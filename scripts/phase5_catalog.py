@@ -20,8 +20,39 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 VISION_MODEL = "qwen2.5vl:7b"
 
 
+def run_ocr(filepath: Path) -> dict | None:
+    """Run best available OCR engine on an image. Returns extracted text or None."""
+    try:
+        from paddleocr import PaddleOCR
+        ocr = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
+        result = ocr.ocr(str(filepath), cls=True)
+        if result and result[0]:
+            lines = [det[1][0] for det in result[0] if det[1][1] >= 0.5]
+            if lines:
+                return {"engine": "paddleocr", "text": "\n".join(lines), "line_count": len(lines)}
+    except ImportError:
+        pass
+
+    try:
+        from PIL import Image as PILImage
+        from surya.recognition import RecognitionPredictor
+        from surya.detection import DetectionPredictor
+        image = PILImage.open(filepath).convert("RGB")
+        det = DetectionPredictor()
+        rec = RecognitionPredictor()
+        preds = rec([image], [["en"]], det)
+        if preds and preds[0].text_lines:
+            lines = [l.text for l in preds[0].text_lines if l.confidence >= 0.5]
+            if lines:
+                return {"engine": "surya", "text": "\n".join(lines), "line_count": len(lines)}
+    except ImportError:
+        pass
+
+    return None
+
+
 def catalog_image(filepath: Path) -> dict:
-    """Classify a single image using Ollama vision."""
+    """Classify a single image using Ollama vision + OCR."""
     with open(filepath, "rb") as f:
         img_b64 = base64.b64encode(f.read()).decode("utf-8")
 
@@ -41,16 +72,25 @@ def catalog_image(filepath: Path) -> dict:
         "stream": False,
         "options": {"temperature": 0.1, "num_predict": 300},
     }
+    result = {}
     try:
         resp = requests.post(OLLAMA_URL, json=payload, timeout=120)
         resp.raise_for_status()
         raw = resp.json().get("response", "")
         json_match = re.search(r'\{[^}]*\}', raw, re.DOTALL)
         if json_match:
-            return json.loads(json_match.group())
-        return {"description": raw[:300]}
+            result = json.loads(json_match.group())
+        else:
+            result = {"description": raw[:300]}
     except Exception as e:
-        return {"error": str(e)}
+        result = {"error": str(e)}
+
+    # Run OCR for text extraction
+    ocr_result = run_ocr(filepath)
+    if ocr_result:
+        result["ocr"] = ocr_result
+
+    return result
 
 
 def catalog_audio(filepath: Path) -> dict:
@@ -243,13 +283,28 @@ def main():
     catalog = []
     for filepath in files:
         print(f"  Processing: {relative_path(filepath)}...")
-        with TimedOperation(f"catalog/{filepath.name}"):
+        with TimedOperation(f"catalog/{filepath.name}") as t:
             entry = process_file(filepath)
+        entry["timing"] = {"catalog_s": round(t.elapsed, 4)}
         catalog.append(entry)
+
+    # Timing summary
+    times_by_type = {}
+    for e in catalog:
+        mt = e.get("media_type", "unknown")
+        ct = e.get("timing", {}).get("catalog_s", 0)
+        times_by_type.setdefault(mt, []).append(ct)
+    timing_summary = {
+        "total_files": len(catalog),
+        "per_type_avg_s": {k: round(sum(v) / len(v), 4) for k, v in times_by_type.items()},
+        "per_type_total_s": {k: round(sum(v), 4) for k, v in times_by_type.items()},
+        "phase_total_s": round(sum(e.get("timing", {}).get("catalog_s", 0) for e in catalog), 4),
+    }
 
     output = {
         "catalog_version": "1.0",
         "total_files": len(catalog),
+        "timing_summary": timing_summary,
         "entries": catalog,
     }
     save_result(output, OUTPUT_DIR / "catalog.json")

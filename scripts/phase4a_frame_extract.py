@@ -79,9 +79,9 @@ def process_video(filepath: Path) -> dict:
 
     if filepath.stat().st_size == 0:
         print("  [SKIP] Zero-byte file")
-        return {"file": rel, "filename": filepath.name, "error": "zero-byte file"}
+        return {"file": rel, "filename": filepath.name, "error": "zero-byte file", "timing": {}}
 
-    entry = {"file": rel, "filename": filepath.name}
+    entry = {"file": rel, "filename": filepath.name, "timing": {}}
 
     duration = get_video_duration(filepath)
     entry["duration_seconds"] = duration
@@ -90,22 +90,25 @@ def process_video(filepath: Path) -> dict:
     video_frames_dir = FRAMES_DIR / filepath.stem
 
     # Try scene detection first
-    with TimedOperation(f"scene_detect/{filepath.name}"):
+    with TimedOperation(f"scene_detect/{filepath.name}") as t:
         scene_frames = extract_scene_keyframes(filepath, video_frames_dir)
+    entry["timing"]["scene_detect_s"] = round(t.elapsed, 4)
     entry["scene_frames"] = len(scene_frames)
     entry["scene_frame_paths"] = [str(f) for f in scene_frames]
 
     # If scene detection got few frames, try interval sampling
     if len(scene_frames) < 3 and duration > 10:
         print(f"  Scene detection got {len(scene_frames)} frames, trying interval...")
-        with TimedOperation(f"interval/{filepath.name}"):
+        with TimedOperation(f"interval/{filepath.name}") as t:
             interval_frames = extract_interval_keyframes(filepath, video_frames_dir, duration)
+        entry["timing"]["interval_extract_s"] = round(t.elapsed, 4)
         entry["interval_frames"] = len(interval_frames)
         entry["interval_frame_paths"] = [str(f) for f in interval_frames]
     else:
         entry["interval_frames"] = 0
         entry["interval_frame_paths"] = []
 
+    entry["timing"]["total_s"] = round(sum(entry["timing"].values()), 4)
     total = entry["scene_frames"] + entry["interval_frames"]
     print(f"  Total frames extracted: {total}")
 
@@ -125,9 +128,18 @@ def main():
         entry = process_video(filepath)
         results.append(entry)
 
+    # Timing summary
+    scene_times = [r["timing"]["scene_detect_s"] for r in results if r.get("timing", {}).get("scene_detect_s")]
+    timing_summary = {
+        "total_videos": len(videos),
+        "scene_detect_avg_s": round(sum(scene_times) / max(len(scene_times), 1), 4),
+        "phase_total_s": round(sum(r.get("timing", {}).get("total_s", 0) for r in results), 4),
+    }
+
     output = {
         "phase": "4a_frame_extraction",
         "total_videos": len(videos),
+        "timing_summary": timing_summary,
         "results": results,
     }
     save_result(output, OUTPUT_DIR / "frame_extraction.json")

@@ -15,6 +15,10 @@ dependencies = [
     "pandas>=2.0",
     # Phase 3: Audio
     "openai-whisper>=20231117",
+    # Phase 2d: OCR
+    "paddleocr>=3.0",
+    "paddlepaddle-gpu>=3.0",
+    "surya-ocr>=0.9",
     # Phase 5: Catalog
     "rich>=13.0",
 ]

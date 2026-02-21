@@ -116,13 +116,13 @@ def get_frame_paths(prior: dict, filename: str) -> list[str]:
     return []
 
 
-def classify_frame(frame_path: str) -> str:
+def classify_frame(frame_path: str) -> dict:
     """Send a single frame to Ollama vision for classification."""
     try:
         with open(frame_path, "rb") as f:
             img_b64 = base64.b64encode(f.read()).decode("utf-8")
     except FileNotFoundError:
-        return "frame not found"
+        return {"description": "frame not found", "total_duration_ms": 0}
 
     payload = {
         "model": VISION_MODEL,
@@ -135,9 +135,13 @@ def classify_frame(frame_path: str) -> str:
     try:
         resp = requests.post(OLLAMA_URL, json=payload, timeout=60)
         resp.raise_for_status()
-        return resp.json().get("response", "")
+        data = resp.json()
+        return {
+            "description": data.get("response", ""),
+            "total_duration_ms": data.get("total_duration", 0) / 1e6,
+        }
     except Exception as e:
-        return f"error: {e}"
+        return {"description": f"error: {e}", "total_duration_ms": 0}
 
 
 def parse_filename(filename: str) -> dict:
@@ -226,13 +230,14 @@ def process_video(filepath: Path, prior: dict) -> dict:
     print(f"{'=' * 50}")
 
     if filepath.stat().st_size == 0:
-        return {"file": rel, "filename": filepath.name, "error": "zero-byte file"}
+        return {"file": rel, "filename": filepath.name, "error": "zero-byte file", "timing": {}}
 
-    entry = {"file": rel, "filename": filepath.name, "signals": {}}
+    entry = {"file": rel, "filename": filepath.name, "signals": {}, "timing": {}}
 
     # Signal 1: Metadata
-    with TimedOperation("metadata"):
+    with TimedOperation("metadata") as t:
         entry["signals"]["metadata"] = get_metadata_for_file(prior, filepath.name)
+    entry["timing"]["metadata_lookup_s"] = round(t.elapsed, 4)
 
     # Signal 2: Filename parsing
     entry["signals"]["filename_hints"] = parse_filename(filepath.name)
@@ -246,10 +251,14 @@ def process_video(filepath: Path, prior: dict) -> dict:
     frame_paths = get_frame_paths(prior, filepath.name)
     if frame_paths:
         entry["signals"]["frame_descriptions"] = []
+        frame_total = 0.0
         for fp in frame_paths[:3]:
-            with TimedOperation(f"frame_classify/{Path(fp).name}"):
-                desc = classify_frame(fp)
-            entry["signals"]["frame_descriptions"].append(desc)
+            with TimedOperation(f"frame_classify/{Path(fp).name}") as t:
+                result = classify_frame(fp)
+            frame_total += t.elapsed
+            entry["signals"]["frame_descriptions"].append(result["description"])
+        entry["timing"]["frame_classify_s"] = round(frame_total, 4)
+        entry["timing"]["frame_classify_count"] = len(frame_paths[:3])
 
     # Signal 5: Audio analysis
     audio = get_audio_results(prior, filepath.name)
@@ -258,9 +267,11 @@ def process_video(filepath: Path, prior: dict) -> dict:
 
     # Synthesize
     print("  Synthesizing identification...")
-    with TimedOperation("synthesis"):
+    with TimedOperation("synthesis") as t:
         entry["identification"] = synthesize_identification(entry["signals"])
+    entry["timing"]["synthesis_s"] = round(t.elapsed, 4)
 
+    entry["timing"]["total_s"] = round(sum(v for v in entry["timing"].values() if isinstance(v, float)), 4)
     return entry
 
 
@@ -278,9 +289,17 @@ def main():
         entry = process_video(filepath, prior)
         results.append(entry)
 
+    # Timing summary
+    timing_summary = {
+        "total_videos": len(videos),
+        "per_video_avg_s": round(sum(r.get("timing", {}).get("total_s", 0) for r in results) / max(len(results), 1), 4),
+        "phase_total_s": round(sum(r.get("timing", {}).get("total_s", 0) for r in results), 4),
+    }
+
     output = {
         "phase": "4b_video_classification",
         "total_videos": len(videos),
+        "timing_summary": timing_summary,
         "results": results,
     }
     save_result(output, OUTPUT_DIR / "video_classification.json")

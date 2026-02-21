@@ -139,12 +139,22 @@ def main():
     wd_wins = sum(1 for s in identification_scores if s["wd_score"] > s["ollama_score"])
     ties = sum(1 for s in identification_scores if s["ollama_score"] == s["wd_score"])
 
+    # Timing comparison from source data
+    ollama_timing = ollama_data.get("timing_summary", {})
+    wd_timing = wd_data.get("timing_summary", {})
+
     summary = {
         "total_images": len(all_files),
         "ollama_wins": ollama_wins,
         "wd_wins": wd_wins,
         "ties": ties,
         "note": "Wins based on series identification from filename hints",
+        "timing_comparison": {
+            "ollama_per_image_avg_s": ollama_timing.get("per_image_avg_s", "N/A"),
+            "ollama_phase_total_s": ollama_timing.get("phase_total_s", "N/A"),
+            "wd_tagger_per_image_avg_s": wd_timing.get("per_image_avg_s", "N/A"),
+            "wd_tagger_phase_total_s": wd_timing.get("phase_total_s", "N/A"),
+        },
     }
 
     output = {

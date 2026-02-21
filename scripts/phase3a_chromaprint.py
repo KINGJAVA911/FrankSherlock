@@ -63,22 +63,25 @@ def process_audio_file(filepath: Path) -> dict:
     print(f"\n--- {rel} ---")
 
     if filepath.stat().st_size == 0:
-        return {"file": rel, "filename": filepath.name, "error": "zero-byte file"}
+        return {"file": rel, "filename": filepath.name, "error": "zero-byte file", "timing": {}}
 
-    entry = {"file": rel, "filename": filepath.name}
+    entry = {"file": rel, "filename": filepath.name, "timing": {}}
 
-    with TimedOperation(f"fpcalc/{filepath.name}"):
+    with TimedOperation(f"fpcalc/{filepath.name}") as t:
         fp = run_fpcalc(filepath)
+    entry["timing"]["fpcalc_s"] = round(t.elapsed, 4)
     entry["fingerprint"] = fp
 
     if fp and "fingerprint" in fp:
         duration = fp.get("duration", 0)
-        with TimedOperation(f"acoustid/{filepath.name}"):
+        with TimedOperation(f"acoustid/{filepath.name}") as t:
             lookup = lookup_acoustid(fp["fingerprint"], int(duration))
+        entry["timing"]["acoustid_s"] = round(t.elapsed, 4)
         entry["acoustid"] = lookup
     else:
         entry["acoustid"] = {"status": "skipped", "reason": "no fingerprint generated"}
 
+    entry["timing"]["total_s"] = round(sum(entry["timing"].values()), 4)
     return entry
 
 
@@ -107,11 +110,12 @@ def main():
     for video in playable_videos:
         temp_wav = temp_dir / f"{video.stem}_audio.wav"
         print(f"\n--- Extracting: {relative_path(video)} ---")
-        with TimedOperation(f"extract/{video.name}"):
+        with TimedOperation(f"extract/{video.name}") as t_extract:
             ok = extract_audio_from_video(video, temp_wav)
         if ok and temp_wav.exists() and temp_wav.stat().st_size > 0:
             entry = process_audio_file(temp_wav)
             entry["source_video"] = relative_path(video)
+            entry["timing"]["audio_extract_s"] = round(t_extract.elapsed, 4)
             results.append(entry)
         else:
             results.append({
@@ -119,12 +123,29 @@ def main():
                 "filename": video.name,
                 "error": "audio extraction failed",
                 "source_video": relative_path(video),
+                "timing": {"audio_extract_s": round(t_extract.elapsed, 4)},
             })
+
+    # Timing summary
+    timing_by_tool = {}
+    for r in results:
+        for key, val in r.get("timing", {}).items():
+            if key == "total_s":
+                continue
+            timing_by_tool.setdefault(key, []).append(val)
+    timing_summary = {
+        "total_files": len(results),
+        "per_tool_avg_s": {k: round(sum(v) / len(v), 4) for k, v in timing_by_tool.items()},
+        "per_tool_total_s": {k: round(sum(v), 4) for k, v in timing_by_tool.items()},
+        "per_file_avg_s": round(sum(r.get("timing", {}).get("total_s", 0) for r in results) / max(len(results), 1), 4),
+        "phase_total_s": round(sum(r.get("timing", {}).get("total_s", 0) for r in results), 4),
+    }
 
     output = {
         "phase": "3a_chromaprint",
         "total_files": len(results),
         "acoustid_api_key_set": ACOUSTID_API_KEY is not None,
+        "timing_summary": timing_summary,
         "results": results,
     }
     save_result(output, OUTPUT_DIR / "chromaprint_results.json")

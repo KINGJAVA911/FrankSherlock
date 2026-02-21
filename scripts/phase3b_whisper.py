@@ -59,9 +59,9 @@ def process_audio(filepath: Path, is_long_video: bool = False) -> dict:
     print(f"\n--- {rel} ---")
 
     if filepath.stat().st_size == 0:
-        return {"file": rel, "filename": filepath.name, "error": "zero-byte file"}
+        return {"file": rel, "filename": filepath.name, "error": "zero-byte file", "timing": {}}
 
-    entry = {"file": rel, "filename": filepath.name, "models": {}}
+    entry = {"file": rel, "filename": filepath.name, "models": {}, "timing": {}}
 
     # Prepare audio (convert to wav if needed)
     temp_dir = OUTPUT_DIR / "temp_whisper"
@@ -72,19 +72,23 @@ def process_audio(filepath: Path, is_long_video: bool = False) -> dict:
     else:
         audio_path = temp_dir / f"{filepath.stem}.wav"
         if not audio_path.exists():
-            with TimedOperation(f"convert/{filepath.name}"):
+            with TimedOperation(f"convert/{filepath.name}") as t:
                 ok = extract_audio_segment(filepath, audio_path)
+            entry["timing"]["convert_s"] = round(t.elapsed, 4)
             if not ok:
-                return {"file": rel, "filename": filepath.name, "error": "audio conversion failed"}
+                return {"file": rel, "filename": filepath.name, "error": "audio conversion failed", "timing": entry["timing"]}
 
     for model_name in WHISPER_MODELS:
-        with TimedOperation(f"whisper-{model_name}/{filepath.name}"):
+        with TimedOperation(f"whisper-{model_name}/{filepath.name}") as t:
             try:
                 result = transcribe_with_whisper(audio_path, model_name)
+                result["elapsed_s"] = round(t.elapsed, 4)
                 entry["models"][model_name] = result
             except Exception as e:
                 entry["models"][model_name] = {"error": str(e)}
+        entry["timing"][f"whisper_{model_name}_s"] = round(t.elapsed, 4)
 
+    entry["timing"]["total_s"] = round(sum(entry["timing"].values()), 4)
     return entry
 
 
@@ -96,26 +100,31 @@ def process_long_video(video_path: Path) -> dict:
     temp_dir = OUTPUT_DIR / "temp_whisper"
     temp_dir.mkdir(parents=True, exist_ok=True)
 
-    entry = {"file": rel, "filename": video_path.name, "segments": {}}
+    entry = {"file": rel, "filename": video_path.name, "segments": {}, "timing": {}}
 
     for seg in GOLDFINGER_SEGMENTS:
         seg_path = temp_dir / f"{video_path.stem}_{seg['name']}.wav"
-        with TimedOperation(f"extract/{seg['name']}"):
+        with TimedOperation(f"extract/{seg['name']}") as t:
             ok = extract_audio_segment(video_path, seg_path, seg["start"], seg["duration"])
+        entry["timing"][f"extract_{seg['name']}_s"] = round(t.elapsed, 4)
         if not ok:
             entry["segments"][seg["name"]] = {"error": "extraction failed"}
             continue
 
-        segment_results = {"models": {}}
+        segment_results = {"models": {}, "timing": {}}
         for model_name in WHISPER_MODELS:
-            with TimedOperation(f"whisper-{model_name}/{seg['name']}"):
+            with TimedOperation(f"whisper-{model_name}/{seg['name']}") as t:
                 try:
                     result = transcribe_with_whisper(seg_path, model_name)
+                    result["elapsed_s"] = round(t.elapsed, 4)
                     segment_results["models"][model_name] = result
                 except Exception as e:
                     segment_results["models"][model_name] = {"error": str(e)}
+            segment_results["timing"][f"whisper_{model_name}_s"] = round(t.elapsed, 4)
+            entry["timing"][f"whisper_{model_name}_{seg['name']}_s"] = round(t.elapsed, 4)
         entry["segments"][seg["name"]] = segment_results
 
+    entry["timing"]["total_s"] = round(sum(entry["timing"].values()), 4)
     return entry
 
 
@@ -150,23 +159,47 @@ def main():
             temp_dir = OUTPUT_DIR / "temp_whisper"
             temp_dir.mkdir(parents=True, exist_ok=True)
             temp_wav = temp_dir / f"{video.stem}_audio.wav"
-            with TimedOperation(f"extract/{video.name}"):
+            with TimedOperation(f"extract/{video.name}") as t_extract:
                 ok = extract_audio_segment(video, temp_wav, duration=60)
             if ok and temp_wav.exists():
                 entry = process_audio(temp_wav)
                 entry["source_video"] = relative_path(video)
+                entry["timing"]["audio_extract_s"] = round(t_extract.elapsed, 4)
             else:
                 entry = {
                     "file": relative_path(video),
                     "filename": video.name,
                     "error": "audio extraction failed",
+                    "timing": {"audio_extract_s": round(t_extract.elapsed, 4)},
                 }
         results.append(entry)
+
+    # Timing summary
+    timing_by_model = {}
+    for r in results:
+        for key, val in r.get("timing", {}).items():
+            if key == "total_s":
+                continue
+            # Normalize key to just the model name
+            for m in WHISPER_MODELS:
+                if f"whisper_{m}" in key:
+                    timing_by_model.setdefault(f"whisper_{m}", []).append(val)
+                    break
+            else:
+                timing_by_model.setdefault(key, []).append(val)
+    timing_summary = {
+        "total_files": len(results),
+        "per_tool_avg_s": {k: round(sum(v) / len(v), 4) for k, v in timing_by_model.items()},
+        "per_tool_total_s": {k: round(sum(v), 4) for k, v in timing_by_model.items()},
+        "per_file_avg_s": round(sum(r.get("timing", {}).get("total_s", 0) for r in results) / max(len(results), 1), 4),
+        "phase_total_s": round(sum(r.get("timing", {}).get("total_s", 0) for r in results), 4),
+    }
 
     output = {
         "phase": "3b_whisper",
         "models": WHISPER_MODELS,
         "total_files": len(results),
+        "timing_summary": timing_summary,
         "results": results,
     }
     save_result(output, OUTPUT_DIR / "whisper_results.json")

@@ -91,6 +91,7 @@ def process_file(filepath: Path) -> dict:
         "media_type": media_type,
         "file_size": file_size,
         "file_size_human": format_size(file_size),
+        "timing": {},
     }
 
     # Skip zero-byte files
@@ -100,20 +101,23 @@ def process_file(filepath: Path) -> dict:
         return entry
 
     # ExifTool — works on everything
-    with TimedOperation(f"exiftool {filepath.name}"):
+    with TimedOperation(f"exiftool {filepath.name}") as t:
         exif = run_exiftool(filepath)
+    entry["timing"]["exiftool_s"] = round(t.elapsed, 4)
     if exif:
         entry["exiftool"] = exif
 
     # ffprobe + MediaInfo — audio/video only
     if media_type in ("audio", "video"):
-        with TimedOperation(f"ffprobe {filepath.name}"):
+        with TimedOperation(f"ffprobe {filepath.name}") as t:
             ffp = run_ffprobe(filepath)
+        entry["timing"]["ffprobe_s"] = round(t.elapsed, 4)
         if ffp:
             entry["ffprobe"] = ffp
 
-        with TimedOperation(f"mediainfo {filepath.name}"):
+        with TimedOperation(f"mediainfo {filepath.name}") as t:
             mi = run_mediainfo(filepath)
+        entry["timing"]["mediainfo_s"] = round(t.elapsed, 4)
         if mi:
             entry["mediainfo"] = mi
 
@@ -122,6 +126,9 @@ def process_file(filepath: Path) -> dict:
         nfo = parse_nfo(filepath)
         if nfo:
             entry["nfo_parsed"] = nfo
+
+    # Total time for this file
+    entry["timing"]["total_s"] = round(sum(entry["timing"].values()), 4)
 
     return entry
 
@@ -161,10 +168,26 @@ def main():
         entry = process_file(nfo_path)
         results.append(entry)
 
+    # Compute timing summary
+    timing_by_tool = {}
+    for r in results:
+        for key, val in r.get("timing", {}).items():
+            if key == "total_s":
+                continue
+            timing_by_tool.setdefault(key, []).append(val)
+    timing_summary = {
+        "total_files": len(results),
+        "per_tool_avg_s": {k: round(sum(v) / len(v), 4) for k, v in timing_by_tool.items()},
+        "per_tool_total_s": {k: round(sum(v), 4) for k, v in timing_by_tool.items()},
+        "per_file_avg_s": round(sum(r.get("timing", {}).get("total_s", 0) for r in results) / max(len(results), 1), 4),
+        "phase_total_s": round(sum(r.get("timing", {}).get("total_s", 0) for r in results), 4),
+    }
+
     # Summary
     output = {
         "phase": "1_metadata",
         "total_files": len(results),
+        "timing_summary": timing_summary,
         "errors": errors,
         "files": results,
     }

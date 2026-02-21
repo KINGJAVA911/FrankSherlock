@@ -131,11 +131,21 @@ def main():
     for c in comparisons:
         winners[c["winner"]] += 1
 
+    # Timing comparison from source data
+    chromaprint_timing = chromaprint_data.get("timing_summary", {})
+    whisper_timing = whisper_data.get("timing_summary", {})
+
     output = {
         "phase": "3c_comparison",
         "summary": {
             "total_files": len(comparisons),
             "winners": winners,
+            "timing_comparison": {
+                "chromaprint_per_file_avg_s": chromaprint_timing.get("per_file_avg_s", "N/A"),
+                "chromaprint_phase_total_s": chromaprint_timing.get("phase_total_s", "N/A"),
+                "whisper_per_file_avg_s": whisper_timing.get("per_file_avg_s", "N/A"),
+                "whisper_phase_total_s": whisper_timing.get("phase_total_s", "N/A"),
+            },
         },
         "comparisons": comparisons,
     }

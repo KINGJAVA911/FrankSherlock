@@ -72,16 +72,21 @@ def process_image(filepath: Path) -> dict:
     print(f"\n--- {rel} ---")
 
     image_b64 = encode_image(filepath)
-    entry = {"file": rel, "filename": filepath.name, "models": {}}
+    entry = {"file": rel, "filename": filepath.name, "models": {}, "timing": {}}
 
     for model in MODELS:
         entry["models"][model] = {}
         for prompt_name, prompt_text in PROMPTS.items():
             label = f"{model}/{prompt_name}/{filepath.name}"
-            with TimedOperation(label):
+            with TimedOperation(label) as t:
                 result = query_ollama(model, prompt_text, image_b64)
+            result["wall_clock_s"] = round(t.elapsed, 4)
             entry["models"][model][prompt_name] = result
+            entry["timing"][f"{model}/{prompt_name}"] = round(t.elapsed, 4)
 
+    entry["timing"]["total_s"] = round(sum(
+        v for k, v in entry["timing"].items() if k != "total_s"
+    ), 4)
     return entry
 
 
@@ -112,12 +117,28 @@ def main():
         # Save incrementally
         save_result(results, OUTPUT_DIR / "ollama_vision_results.json")
 
+    # Timing summary
+    timing_by_model_prompt = {}
+    for r in results:
+        for key, val in r.get("timing", {}).items():
+            if key == "total_s":
+                continue
+            timing_by_model_prompt.setdefault(key, []).append(val)
+    timing_summary = {
+        "total_images": len(images),
+        "total_calls": len(images) * len(MODELS) * len(PROMPTS),
+        "per_model_prompt_avg_s": {k: round(sum(v) / len(v), 4) for k, v in timing_by_model_prompt.items()},
+        "per_image_avg_s": round(sum(r.get("timing", {}).get("total_s", 0) for r in results) / max(len(results), 1), 4),
+        "phase_total_s": round(sum(r.get("timing", {}).get("total_s", 0) for r in results), 4),
+    }
+
     output = {
         "phase": "2a_ollama_vision",
         "models": MODELS,
         "prompts": list(PROMPTS.keys()),
         "total_images": len(images),
         "total_calls": len(images) * len(MODELS) * len(PROMPTS),
+        "timing_summary": timing_summary,
         "results": results,
     }
     save_result(output, OUTPUT_DIR / "ollama_vision_results.json")

@@ -47,6 +47,26 @@ def detect_media_type(filepath: str | Path) -> str:
         category = mime.split("/")[0]
         if category in ("image", "audio", "video"):
             return category
+        if mime == "application/pdf":
+            return "document"
+
+    # Fallback: use `file` command for extensionless files
+    if not ext:
+        try:
+            result = subprocess.run(
+                ["file", "--brief", "--mime-type", str(filepath)],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                detected_mime = result.stdout.strip()
+                cat = detected_mime.split("/")[0]
+                if cat in ("image", "audio", "video"):
+                    return cat
+                if "pdf" in detected_mime or "document" in detected_mime:
+                    return "document"
+        except Exception:
+            pass
+
     return "unknown"
 
 

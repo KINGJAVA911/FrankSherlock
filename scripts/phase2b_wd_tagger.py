@@ -114,26 +114,38 @@ def main():
         rel = relative_path(filepath)
         print(f"\n--- {rel} ---")
         try:
-            with TimedOperation(f"wd_tagger/{filepath.name}"):
+            with TimedOperation(f"wd_tagger/{filepath.name}") as t:
                 tag_result = run_tagger(session, tags, filepath)
             entry = {
                 "file": rel,
                 "filename": filepath.name,
                 "tags": tag_result,
-                "top_general": [t["tag"] for t in tag_result["general"][:10]],
-                "top_characters": [t["tag"] for t in tag_result["character"][:5]],
+                "top_general": [t_tag["tag"] for t_tag in tag_result["general"][:10]],
+                "top_characters": [t_tag["tag"] for t_tag in tag_result["character"][:5]],
                 "rating": tag_result["rating"],
+                "timing": {"inference_s": round(t.elapsed, 4)},
             }
         except Exception as e:
-            entry = {"file": rel, "filename": filepath.name, "error": str(e)}
+            entry = {"file": rel, "filename": filepath.name, "error": str(e), "timing": {}}
             print(f"  [ERROR] {e}")
         results.append(entry)
+
+    # Timing summary
+    inference_times = [r["timing"]["inference_s"] for r in results if r.get("timing", {}).get("inference_s")]
+    timing_summary = {
+        "total_images": len(images),
+        "per_image_avg_s": round(sum(inference_times) / max(len(inference_times), 1), 4),
+        "per_image_min_s": round(min(inference_times), 4) if inference_times else 0,
+        "per_image_max_s": round(max(inference_times), 4) if inference_times else 0,
+        "phase_total_s": round(sum(inference_times), 4),
+    }
 
     output = {
         "phase": "2b_wd_tagger",
         "model": MODEL_REPO,
         "threshold": CONFIDENCE_THRESHOLD,
         "total_images": len(images),
+        "timing_summary": timing_summary,
         "results": results,
     }
     save_result(output, OUTPUT_DIR / "wd_tagger_results.json")
