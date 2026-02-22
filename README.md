@@ -111,7 +111,7 @@ sherlock/                  <- Main application
     scripts/
       surya_ocr.py         <- Isolated OCR script
     src/                   <- React frontend (VSCode-inspired UI)
-classification/            <- Python PoC of the classification pipeline
+_classification/           <- Python PoC of the classification pipeline
 ```
 
 ### Research & Prototyping (Historical)

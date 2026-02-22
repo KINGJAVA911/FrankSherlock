@@ -11,7 +11,7 @@ sherlock/               <- THE MAIN APP (Tauri v2 desktop)
   desktop/
     src-tauri/          <- Rust backend (scan, classify, thumbnail, db, config)
     src/                <- React frontend (VSCode-inspired UI)
-classification/         <- PoC: Python classification pipeline (informed classify.rs)
+_classification/        <- PoC: Python classification pipeline (informed classify.rs)
 _research_ab_test/      <- A/B benchmark research (scripts, docs, test files)
   scripts/              <- Benchmark scripts for model selection
   docs/                 <- Research notes: IDEA.md, IDEA2.md, RESULTS.md
