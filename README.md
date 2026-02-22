@@ -14,7 +14,7 @@ Local-only, AI-powered image cataloging and search for your NAS. Scans directori
 
 ## Screenshot
 
-The app provides a dark-themed search interface with thumbnail grid, media type filters, confidence slider, and click-to-preview overlay.
+The app provides a VSCode-inspired search interface with custom titlebar, collapsible sidebar, thumbnail grid, media type filters, confidence slider, click-to-preview overlay, and automatic light/dark theme support.
 
 ## Requirements
 
@@ -36,7 +36,7 @@ npm install
 npm run tauri:dev
 ```
 
-On first launch, the app will prompt you to download the required model (`qwen2.5vl:7b`) if it's not already installed. Enter a directory path and click "Scan Root" to start indexing.
+On first launch, the app will prompt you to download the required model (`qwen2.5vl:7b`) if it's not already installed. Click "Add Folder..." in the sidebar to pick a directory and start indexing.
 
 ### Wayland/NVIDIA Workaround
 
@@ -62,7 +62,7 @@ cd sherlock/desktop/src-tauri
 cargo test
 ```
 
-47 unit tests covering classification JSON parsing, thumbnail generation, incremental scanning, database operations, and query parsing.
+49 unit tests covering classification JSON parsing, thumbnail generation, incremental scanning, database operations, scan cancellation, and query parsing.
 
 ## How It Works
 
@@ -102,41 +102,38 @@ sherlock/                  <- Main application
     src-tauri/src/         <- Rust backend
       classify.rs          <- Ollama vision + Surya OCR pipeline
       thumbnail.rs         <- Thumbnail generation
-      scan.rs              <- Incremental scanner
+      scan.rs              <- Incremental scanner with cancellation
       db.rs                <- SQLite + FTS5
       config.rs            <- App paths
-      lib.rs               <- Tauri commands
+      lib.rs               <- Tauri commands, auto-cleanup
       query_parser.rs      <- NL query parsing
       runtime.rs           <- Ollama/GPU status
     scripts/
       surya_ocr.py         <- Isolated OCR script
-    src/                   <- React frontend
+    src/                   <- React frontend (VSCode-inspired UI)
+classification/            <- Python PoC of the classification pipeline
 ```
 
 ### Research & Prototyping (Historical)
 
-These directories contain the research that informed Frank Sherlock's design. They are not part of the main application.
+These directories contain the A/B testing research that informed Frank Sherlock's model selection and pipeline design. They are not part of the main application.
 
 ```
-classification/            <- Python PoC of the classification pipeline
-                              (reimplemented in Rust as classify.rs)
-
-scripts/                   <- A/B benchmark scripts for model selection
-                              Tested: qwen2.5vl (7b/32b), llava:13b,
-                              minicpm-v:8b, WD taggers, Surya vs LLM OCR,
-                              Whisper variants, chromaprint, and more
-
-docs/                      <- Research notes
-  IDEA.md                  <- Original project brief
-  IDEA2.md                 <- Classification PoC + main app requirements
-  RESULTS.md               <- Benchmark results across all phases
-
-lib/                       <- Shared Python helpers for benchmark scripts
-results/                   <- Generated benchmark outputs (gitignored)
-test_files/                <- Test corpus of images, audio, video, documents
+_research_ab_test/
+  scripts/                 <- A/B benchmark scripts for model selection
+  docs/                    <- Research notes (IDEA.md, RESULTS.md, etc.)
+  lib/                     <- Shared Python helpers for benchmark scripts
+  results/                 <- Generated benchmark outputs (gitignored)
+  test_files/              <- Test corpus (gitignored, see note below)
 ```
 
-The benchmark results (`docs/RESULTS.md`) document why `qwen2.5vl:7b` was chosen over `llava:13b` and `minicpm-v:8b` (80% type accuracy vs 33-50%), and why Surya was chosen as primary OCR (95% reference similarity, better coverage than vision LLM alone).
+> **Note:** The original test files (images, audio, video, documents) used for A/B benchmarking are **not included** in this repository. They contained copyrighted media and personal documents used only for private testing. If you want to re-run the A/B benchmarks, you need to:
+>
+> 1. Provide your own media files in `_research_ab_test/test_files/` with subdirectories like `images/`, `old_audio/`, `old_docs/`, `old_tvseries/`
+> 2. Update the ground truth JSON files in `_research_ab_test/docs/` to match your test corpus
+> 3. Adjust the benchmark scripts as needed — you can use Claude Code to help adapt them to your file structure
+
+The benchmark results (`_research_ab_test/docs/RESULTS.md`) document why `qwen2.5vl:7b` was chosen over `llava:13b` and `minicpm-v:8b` (80% type accuracy vs 33-50%), and why Surya was chosen as primary OCR (95% reference similarity, better coverage than vision LLM alone).
 
 ## Data Storage
 

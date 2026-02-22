@@ -1,9 +1,11 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
+  cancelScan,
   cleanupOllamaModels,
   ensureDatabase,
-  getPaths,
   getRuntimeStatus,
   getScanJob,
   getSetupStatus,
@@ -13,7 +15,6 @@ import {
   startSetupDownload
 } from "./api";
 import type {
-  AppPaths,
   DbStats,
   RuntimeStatus,
   ScanJobStatus,
@@ -24,6 +25,7 @@ import type {
 
 const PAGE_SIZE = 40;
 const POLL_MS = 1200;
+const appWindow = getCurrentWindow();
 
 export default function App() {
   const [query, setQuery] = useState("");
@@ -34,8 +36,6 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [dbStats, setDbStats] = useState<DbStats | null>(null);
-  const [paths, setPaths] = useState<AppPaths | null>(null);
-  const [scanInput, setScanInput] = useState("");
   const [minConfidence, setMinConfidence] = useState(0);
   const [selectedMediaType, setSelectedMediaType] = useState("");
   const [setup, setSetup] = useState<SetupStatus | null>(null);
@@ -44,6 +44,7 @@ export default function App() {
   const [trackedJobId, setTrackedJobId] = useState<number | null>(null);
   const [latestJob, setLatestJob] = useState<ScanJobStatus | null>(null);
   const [previewItem, setPreviewItem] = useState<SearchItem | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const requestIdRef = useRef(0);
 
   const canLoadMore = items.length < total;
@@ -57,20 +58,20 @@ export default function App() {
     activeScans[0] ??
     latestJob;
 
+  const isScanning = activeScans.some((s) => s.status === "running");
+
   useEffect(() => {
     let mounted = true;
     (async () => {
       try {
-        const [db, p, setupStatus, runtimeStatus, scans] = await Promise.all([
+        const [db, setupStatus, runtimeStatus, scans] = await Promise.all([
           ensureDatabase(),
-          getPaths(),
           getSetupStatus(),
           getRuntimeStatus(),
           listActiveScans()
         ]);
         if (!mounted) return;
         setDbStats(db);
-        setPaths(p);
         setSetup(setupStatus);
         setRuntime(runtimeStatus);
         setActiveScans(scans);
@@ -95,9 +96,7 @@ export default function App() {
   }, [trackedJobId]);
 
   useEffect(() => {
-    if (setup && !setup.isReady) {
-      return;
-    }
+    if (setup && !setup.isReady) return;
     const timer = setTimeout(() => {
       void runSearch(0, false);
     }, 260);
@@ -115,6 +114,19 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [previewItem]);
 
+  // Auto-dismiss toasts
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 6000);
+    return () => clearTimeout(t);
+  }, [notice]);
+
+  useEffect(() => {
+    if (!error) return;
+    const t = setTimeout(() => setError(null), 10000);
+    return () => clearTimeout(t);
+  }, [error]);
+
   async function pollRuntimeAndScans() {
     try {
       const [setupStatus, runtimeStatus, scans, trackedJob] = await Promise.all([
@@ -131,7 +143,7 @@ export default function App() {
         setLatestJob(trackedJob);
         if (trackedJob.status === "completed") {
           setNotice(
-            `Scan completed for ${trackedJob.rootPath}: ${trackedJob.processedFiles}/${trackedJob.totalFiles} files.`
+            `Scan completed: ${trackedJob.processedFiles}/${trackedJob.totalFiles} files processed.`
           );
           setTrackedJobId(null);
           const stats = await ensureDatabase();
@@ -151,11 +163,8 @@ export default function App() {
 
   async function runSearch(offset: number, append: boolean) {
     const reqId = ++requestIdRef.current;
-    if (append) {
-      setLoadingMore(true);
-    } else {
-      setLoading(true);
-    }
+    if (append) setLoadingMore(true);
+    else setLoading(true);
     try {
       const response = await searchImages({
         query,
@@ -186,17 +195,17 @@ export default function App() {
     await runSearch(items.length, true);
   }
 
-  async function onScanSubmit(event: FormEvent) {
-    event.preventDefault();
-    if (!scanInput.trim()) return;
+  async function onPickAndScan() {
     if (setup && !setup.isReady) {
       setError("Setup is incomplete. Finish Ollama setup before starting scans.");
       return;
     }
-    setError(null);
-    setNotice(null);
     try {
-      const job = await startScan(scanInput.trim());
+      const selected = await open({ directory: true, multiple: false, title: "Select folder to scan" });
+      if (!selected) return;
+      setError(null);
+      setNotice(null);
+      const job = await startScan(selected as string);
       setTrackedJobId(job.id);
       setLatestJob(job);
       setNotice(`Scan started for ${job.rootPath}`);
@@ -206,12 +215,33 @@ export default function App() {
     }
   }
 
+  async function onCancelScan() {
+    if (!currentScan) return;
+    try {
+      await cancelScan(currentScan.id);
+      setNotice("Cancelling scan...");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function onResumeScan() {
+    if (!currentScan) return;
+    try {
+      const job = await startScan(currentScan.rootPath);
+      setTrackedJobId(job.id);
+      setLatestJob(job);
+      setNotice(`Resuming scan for ${job.rootPath}`);
+      await pollRuntimeAndScans();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   async function onCleanupOllama() {
     try {
       const result = await cleanupOllamaModels();
-      setNotice(
-        `Ollama cleanup: stopped ${result.stoppedModels}/${result.runningModels} loaded model(s).`
-      );
+      setNotice(`Unloaded ${result.stoppedModels}/${result.runningModels} model(s).`);
       await pollRuntimeAndScans();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -233,33 +263,21 @@ export default function App() {
   }
 
   function thumbnailSrc(item: SearchItem): string | null {
-    if (item.thumbnailPath) {
-      return convertFileSrc(item.thumbnailPath);
-    }
+    if (item.thumbnailPath) return convertFileSrc(item.thumbnailPath);
     return null;
   }
 
-  function openPreview(item: SearchItem) {
-    setPreviewItem(item);
-  }
-
-  function closePreview() {
-    setPreviewItem(null);
-  }
-
   const scanProgress = currentScan?.totalFiles
-    ? Math.min(
-        100,
-        (currentScan.processedFiles / Math.max(1, currentScan.totalFiles)) * 100
-      )
+    ? Math.min(100, (currentScan.processedFiles / Math.max(1, currentScan.totalFiles)) * 100)
     : 0;
 
   return (
-    <main className="layout">
+    <div className="app-shell">
+      {/* ── Setup Modal ── */}
       {setup && !setup.isReady && (
         <div className="modal-overlay" role="dialog" aria-modal="true">
           <div className="setup-modal">
-            <h2>First-Time Setup Required</h2>
+            <h2>First-Time Setup</h2>
             <p>Sherlock needs local Ollama service and required model(s) before scanning.</p>
             <div className="setup-status-grid">
               <div>
@@ -267,11 +285,11 @@ export default function App() {
                 <p>{setup.ollamaAvailable ? "Running" : "Not detected"}</p>
               </div>
               <div>
-                <strong>Required models</strong>
+                <strong>Required</strong>
                 <p>{setup.requiredModels.join(", ")}</p>
               </div>
               <div>
-                <strong>Missing models</strong>
+                <strong>Missing</strong>
                 <p>{setup.missingModels.length ? setup.missingModels.join(", ") : "None"}</p>
               </div>
             </div>
@@ -286,9 +304,7 @@ export default function App() {
             </div>
             <p className="setup-download-text">{setup.download.message}</p>
             <div className="setup-actions">
-              <button type="button" onClick={onRecheckSetup}>
-                Recheck setup
-              </button>
+              <button type="button" onClick={onRecheckSetup}>Recheck</button>
               <button
                 type="button"
                 onClick={onSetupDownload}
@@ -298,24 +314,22 @@ export default function App() {
                   setup.download.status === "running"
                 }
               >
-                {setup.download.status === "running" ? "Downloading..." : "Download required model"}
+                {setup.download.status === "running" ? "Downloading..." : "Download model"}
               </button>
             </div>
           </div>
         </div>
       )}
 
+      {/* ── Preview Modal ── */}
       {previewItem && (
-        <div className="modal-overlay preview-overlay" onClick={closePreview} role="dialog" aria-modal="true">
+        <div className="modal-overlay preview-overlay" onClick={() => setPreviewItem(null)} role="dialog" aria-modal="true">
           <div className="preview-modal" onClick={(e) => e.stopPropagation()}>
-            <button className="preview-close" onClick={closePreview} type="button" aria-label="Close preview">
+            <button className="preview-close" onClick={() => setPreviewItem(null)} type="button" aria-label="Close preview">
               &times;
             </button>
             <div className="preview-image-wrap">
-              <img
-                src={convertFileSrc(previewItem.absPath)}
-                alt={previewItem.relPath}
-              />
+              <img src={convertFileSrc(previewItem.absPath)} alt={previewItem.relPath} />
             </div>
             <div className="preview-info">
               <h3 title={previewItem.relPath}>{previewItem.relPath}</h3>
@@ -330,147 +344,175 @@ export default function App() {
         </div>
       )}
 
-      <header className="header">
-        <div>
-          <h1>Sherlock</h1>
-          <p>Local-only image intelligence with global search index.</p>
+      {/* ── Titlebar ── */}
+      <div className="titlebar" data-tauri-drag-region>
+        <span>Frank Sherlock</span>
+        <div className="titlebar-controls">
+          <button type="button" onClick={() => appWindow.minimize()} aria-label="Minimize">&#x2500;</button>
+          <button type="button" onClick={() => appWindow.toggleMaximize()} aria-label="Maximize">&#x25A1;</button>
+          <button type="button" className="close" onClick={() => appWindow.close()} aria-label="Close">&#x2715;</button>
         </div>
-        <button className="ghost" onClick={onCleanupOllama} type="button">
-          Cleanup Ollama
-        </button>
-      </header>
+      </div>
 
-      <section className="panel">
-        <div className="meta">
-          <span>Indexed files: {dbStats?.files ?? "..."}</span>
-          <span>Roots: {dbStats?.roots ?? "..."}</span>
-          <span>DB: {paths?.dbFile ?? "..."}</span>
-          <span>Model: {runtime?.currentModel || "none"}</span>
-          <span>
-            VRAM:{" "}
-            {runtime?.vramUsedMib != null && runtime?.vramTotalMib != null
-              ? `${runtime.vramUsedMib} / ${runtime.vramTotalMib} MiB`
-              : "n/a"}
-          </span>
-        </div>
-        <form className="scan-form" onSubmit={onScanSubmit}>
-          <input
-            type="text"
-            value={scanInput}
-            onChange={(e) => setScanInput(e.target.value)}
-            placeholder="/mnt/terachad/Dropbox"
-            aria-label="Scan root path"
-            disabled={setup ? !setup.isReady : true}
-          />
-          <button type="submit" disabled={setup ? !setup.isReady : true}>
-            Scan Root
+      {/* ── Main Area ── */}
+      <div className={`main-area${sidebarOpen ? "" : " sidebar-collapsed"}`}>
+        {/* ── Sidebar ── */}
+        <aside className="sidebar">
+          <div className="sidebar-section">Scan Roots</div>
+          <button type="button" onClick={onPickAndScan} disabled={setup ? !setup.isReady : true}>
+            Add Folder...
           </button>
-        </form>
-        {currentScan && (
-          <div className="scan-progress">
-            <div className="scan-progress-head">
-              <strong>
-                Scan {currentScan.status}: {currentScan.processedFiles} / {currentScan.totalFiles}
-              </strong>
-              <span>{scanProgress.toFixed(1)}%</span>
+          {currentScan && currentScan.status === "running" && (
+            <div className="sidebar-scan-progress">
+              <div>
+                {currentScan.processedFiles} / {currentScan.totalFiles} ({scanProgress.toFixed(1)}%)
+              </div>
+              <progress value={scanProgress} max={100} />
+              <div className="sidebar-scan-meta">
+                +{currentScan.added} new, {currentScan.modified} mod, {currentScan.moved} moved
+              </div>
+              <button type="button" onClick={onCancelScan} style={{ marginTop: 4 }}>Cancel Scan</button>
             </div>
-            <progress value={scanProgress} max={100} />
-            <p className="scan-summary">
-              added {currentScan.added}, modified {currentScan.modified}, moved {currentScan.moved},
-              unchanged {currentScan.unchanged}, deleted {currentScan.deleted}
-            </p>
-          </div>
-        )}
-      </section>
+          )}
+          {currentScan && currentScan.status === "interrupted" && (
+            <div className="sidebar-scan-progress">
+              <div>Interrupted at {currentScan.processedFiles} / {currentScan.totalFiles}</div>
+              <button type="button" onClick={onResumeScan} style={{ marginTop: 4 }}>Resume Scan</button>
+            </div>
+          )}
 
-      <section className="panel">
-        <div className="search-controls">
-          <input
-            type="search"
-            placeholder="Query naturally: 'anime girl from 2024 confidence >= 0.8'"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            aria-label="Search query"
-          />
-          <select
-            value={selectedMediaType}
-            onChange={(e) => setSelectedMediaType(e.target.value)}
-            aria-label="Media type filter"
-          >
-            {mediaTypeOptions.map((opt) => (
-              <option key={opt} value={opt}>
-                {opt ? opt : "all media types"}
-              </option>
-            ))}
-          </select>
-          <label className="confidence">
-            Min confidence
-            <input
-              type="number"
-              min={0}
-              max={1}
-              step={0.05}
-              value={minConfidence}
-              onChange={(e) => setMinConfidence(Number(e.target.value))}
-            />
-          </label>
-        </div>
+          <div className="sidebar-section">Database</div>
+          <div className="sidebar-item">Files: <span>{dbStats?.files ?? "..."}</span></div>
+          <div className="sidebar-item">Roots: <span>{dbStats?.roots ?? "..."}</span></div>
 
-        <div className="results-meta">
-          <span>
-            Showing {items.length} of {total} results
-          </span>
-          {loading && <span>Searching...</span>}
-        </div>
+          <div className="sidebar-section">Actions</div>
+          <button type="button" onClick={onCleanupOllama}>Unload Models</button>
+        </aside>
 
-        <div className="grid" role="list">
-          {items.map((item) => {
-            const thumb = thumbnailSrc(item);
-            return (
-              <article
-                key={item.id}
-                className="tile"
-                role="listitem"
-                tabIndex={0}
-                onClick={() => openPreview(item)}
-                onKeyDown={(e) => {
-                  if (e.key === " " || e.key === "Enter") {
-                    e.preventDefault();
-                    openPreview(item);
-                  }
-                }}
-              >
-                <div className="thumb">
-                  {thumb ? (
-                    <img src={thumb} alt={item.relPath} loading="lazy" />
-                  ) : (
-                    <span className="badge">{item.mediaType}</span>
-                  )}
-                </div>
-                <div className="tile-body">
-                  <h3 title={item.relPath}>{item.relPath}</h3>
-                  <p>{item.description || "No description yet"}</p>
-                  <div className="tile-meta">
-                    <span className="badge">{item.mediaType}</span>
-                    <span>{item.confidence.toFixed(2)}</span>
-                  </div>
-                </div>
-              </article>
-            );
-          })}
-        </div>
-
-        {canLoadMore && (
-          <div className="load-more">
-            <button type="button" onClick={onLoadMore} disabled={loadingMore}>
-              {loadingMore ? "Loading..." : `Load more (${items.length} / ${total})`}
+        {/* ── Content ── */}
+        <div className="content">
+          <div className="toolbar">
+            <button
+              type="button"
+              className="toolbar-toggle"
+              onClick={() => setSidebarOpen((v) => !v)}
+              aria-label="Toggle sidebar"
+            >
+              &#9776;
             </button>
+            <input
+              type="search"
+              placeholder={isScanning ? "Search disabled during scan..." : "Search images..."}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              disabled={isScanning}
+              aria-label="Search query"
+            />
+            <select
+              value={selectedMediaType}
+              onChange={(e) => setSelectedMediaType(e.target.value)}
+              disabled={isScanning}
+              aria-label="Media type filter"
+            >
+              {mediaTypeOptions.map((opt) => (
+                <option key={opt} value={opt}>
+                  {opt ? opt : "all types"}
+                </option>
+              ))}
+            </select>
+            <label className="confidence-wrap">
+              Min conf
+              <input
+                type="number"
+                min={0}
+                max={1}
+                step={0.05}
+                value={minConfidence}
+                onChange={(e) => setMinConfidence(Number(e.target.value))}
+                disabled={isScanning}
+              />
+            </label>
           </div>
-        )}
-      </section>
 
-      {notice && <p className="notice">{notice}</p>}
-      {error && <p className="error">{error}</p>}
-    </main>
+          <div className="content-body">
+            <div className="results-meta">
+              <span>
+                {items.length} of {total} results
+              </span>
+              {loading && <span>Searching...</span>}
+            </div>
+
+            <div className="grid" role="list">
+              {items.map((item) => {
+                const thumb = thumbnailSrc(item);
+                return (
+                  <article
+                    key={item.id}
+                    className="tile"
+                    role="listitem"
+                    tabIndex={0}
+                    onClick={() => setPreviewItem(item)}
+                    onKeyDown={(e) => {
+                      if (e.key === " " || e.key === "Enter") {
+                        e.preventDefault();
+                        setPreviewItem(item);
+                      }
+                    }}
+                  >
+                    <div className="thumb">
+                      {thumb ? (
+                        <img src={thumb} alt={item.relPath} loading="lazy" />
+                      ) : (
+                        <span className="badge">{item.mediaType}</span>
+                      )}
+                    </div>
+                    <div className="tile-body">
+                      <h3 title={item.relPath}>{item.relPath}</h3>
+                      <p>{item.description || "No description yet"}</p>
+                      <div className="tile-meta">
+                        <span className="badge">{item.mediaType}</span>
+                        <span>{item.confidence.toFixed(2)}</span>
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+
+            {canLoadMore && (
+              <div className="load-more">
+                <button type="button" onClick={onLoadMore} disabled={loadingMore}>
+                  {loadingMore ? "Loading..." : `Load more (${items.length} / ${total})`}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Status Bar ── */}
+      <div className="statusbar">
+        <span>
+          VRAM:{" "}
+          {runtime?.vramUsedMib != null && runtime?.vramTotalMib != null
+            ? `${runtime.vramUsedMib}/${runtime.vramTotalMib} MiB`
+            : "n/a"}
+        </span>
+        <span>Files: {dbStats?.files ?? "..."}</span>
+        {isScanning && currentScan && (
+          <span>
+            Scanning: {currentScan.processedFiles}/{currentScan.totalFiles} ({scanProgress.toFixed(0)}%)
+          </span>
+        )}
+        <span className="spacer" />
+        <span>Model: {runtime?.currentModel || "none"}</span>
+      </div>
+
+      {/* ── Toasts ── */}
+      <div className="toast-container">
+        {notice && <div className="toast notice">{notice}</div>}
+        {error && <div className="toast error">{error}</div>}
+      </div>
+    </div>
   );
 }

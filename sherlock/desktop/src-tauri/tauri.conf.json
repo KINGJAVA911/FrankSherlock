@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "sherlock",
+  "productName": "frank_sherlock",
   "version": "0.1.0",
   "identifier": "dev.frank.sherlock",
   "build": {
@@ -12,7 +12,8 @@
   "app": {
     "windows": [
       {
-        "title": "Sherlock",
+        "title": "Frank Sherlock",
+        "decorations": false,
         "width": 1280,
         "height": 860,
         "minWidth": 1024,
@@ -22,12 +23,16 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
     }
   },
   "bundle": {
     "active": true,
-    "targets": "appimage",
+    "targets": "all",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -38,6 +43,14 @@
     "linux": {
       "appimage": {
         "bundleMediaFramework": false
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
       }
     }
   }

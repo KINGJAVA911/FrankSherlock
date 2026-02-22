@@ -7,16 +7,20 @@ Frank Sherlock is a local-only, AI-powered image cataloging and search system. T
 ## Repository Layout
 
 ```
-sherlock/          <- THE MAIN APP (Tauri v2 desktop)
+sherlock/               <- THE MAIN APP (Tauri v2 desktop)
   desktop/
-    src-tauri/     <- Rust backend (scan, classify, thumbnail, db, config)
-    src/           <- React frontend (search UI, preview, thumbnails)
-classification/    <- PoC: Python classification pipeline (informed classify.rs)
-scripts/           <- PoC: A/B benchmark scripts for model selection
-docs/              <- Research notes: IDEA.md, IDEA2.md, RESULTS.md
-lib/               <- Shared Python helpers used by benchmark scripts
-results/           <- Generated benchmark outputs (gitignored, regenerable)
-test_files/        <- Test corpus (media files gitignored, structure tracked)
+    src-tauri/          <- Rust backend (scan, classify, thumbnail, db, config)
+    src/                <- React frontend (VSCode-inspired UI)
+classification/         <- PoC: Python classification pipeline (informed classify.rs)
+_research_ab_test/      <- A/B benchmark research (scripts, docs, test files)
+  scripts/              <- Benchmark scripts for model selection
+  docs/                 <- Research notes: IDEA.md, IDEA2.md, RESULTS.md
+  lib/                  <- Shared Python helpers
+  test_files/           <- Test corpus (gitignored, not shipped)
+  results/              <- Generated benchmark outputs (gitignored)
+scripts/                <- Build scripts (build-local.sh)
+docs/                   <- App assets (app_icon.png)
+.github/workflows/      <- CI/CD (release.yml, ci.yml)
 ```
 
 ## Tech Stack (Main App)
@@ -35,7 +39,7 @@ From `sherlock/desktop/`:
 ```bash
 npm install                    # frontend deps
 cargo build                    # rust backend (from src-tauri/)
-cargo test                     # 47 unit tests
+cargo test                     # 49 unit tests
 npm run tauri:dev              # launch dev mode
 npm run tauri:build            # produce AppImage
 ```
@@ -51,10 +55,10 @@ WEBKIT_DISABLE_DMABUF_RENDERER=1 GDK_BACKEND=wayland,x11 npm run tauri:dev
 |--------|---------|
 | `classify.rs` | Ollama vision LLM pipeline: primary classification (3-attempt + regex salvage), anime enrichment, Surya OCR + LLM fallback, document/receipt extraction |
 | `thumbnail.rs` | 300px JPEG thumbnails, Lanczos3, skip-if-exists, GIF first-frame |
-| `scan.rs` | Two-phase incremental scan: metadata-only discovery (zero reads for unchanged), classification + thumbnail processing, move detection, cache cleanup |
+| `scan.rs` | Two-phase incremental scan: metadata-only discovery (zero reads for unchanged), classification + thumbnail processing, move detection, cache cleanup, cooperative cancellation |
 | `db.rs` | SQLite + FTS5, scan job checkpointing, upsert/move/delete operations |
 | `config.rs` | AppPaths resolution, directory creation |
-| `lib.rs` | Tauri commands, scan worker spawning, setup/download flow |
+| `lib.rs` | Tauri commands, scan worker spawning, setup/download flow, auto-cleanup, scan cancellation |
 | `query_parser.rs` | Natural language query parsing (media type, dates, confidence) |
 | `runtime.rs` | Ollama/nvidia-smi status gathering |
 

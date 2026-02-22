@@ -339,6 +339,16 @@ pub fn complete_scan_job_by_id(
     Ok(())
 }
 
+pub fn cancel_scan_job(db_path: &Path, job_id: i64) -> AppResult<()> {
+    let conn = Connection::open(db_path)?;
+    conn.execute(
+        "UPDATE scan_jobs SET status = 'interrupted', error_text = 'cancelled by user', updated_at = ?2
+         WHERE id = ?1 AND status = 'running'",
+        params![job_id, now_epoch_secs()],
+    )?;
+    Ok(())
+}
+
 pub fn fail_scan_job(db_path: &Path, job_id: i64, error_text: &str) -> AppResult<()> {
     let conn = Connection::open(db_path)?;
     conn.execute(

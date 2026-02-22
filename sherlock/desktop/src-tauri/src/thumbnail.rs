@@ -51,13 +51,15 @@ pub fn generate_thumbnail(
         }
     };
 
+    let max_dim = 300u32;
     let (w, h) = (img.width(), img.height());
-    let max_width = 300u32;
-    let resized = if w > max_width {
-        let new_h = (h as f64 * max_width as f64 / w as f64).round() as u32;
-        img.resize(max_width, new_h, image::imageops::FilterType::Lanczos3)
+    let resized = if w > max_dim || h > max_dim {
+        let scale = max_dim as f64 / w.max(h) as f64;
+        let new_w = (w as f64 * scale).round() as u32;
+        let new_h = (h as f64 * scale).round() as u32;
+        img.resize(new_w, new_h, image::imageops::FilterType::Lanczos3)
     } else {
-        img
+        img // Already small enough, just re-encode as JPEG
     };
 
     let rgb = resized.to_rgb8();
@@ -91,7 +93,6 @@ fn first_frame_if_gif(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     fn create_test_image(dir: &Path, name: &str, width: u32, height: u32) -> PathBuf {
         let path = dir.join(name);
@@ -152,6 +153,18 @@ mod tests {
         let missing = Path::new("/tmp/nonexistent_image_12345.png");
         let result = generate_thumbnail(missing, thumb_dir.path(), "missing.png");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn tall_image_constrained_by_height() {
+        let src_dir = tempfile::tempdir().expect("tempdir");
+        let thumb_dir = tempfile::tempdir().expect("tempdir");
+        let source = create_test_image(src_dir.path(), "tall.png", 200, 800);
+        let result = generate_thumbnail(&source, thumb_dir.path(), "tall.png");
+        assert!(result.is_some());
+        let thumb_img = image::open(result.unwrap()).expect("open");
+        assert!(thumb_img.height() <= 300);
+        assert!(thumb_img.width() < 200);
     }
 
     #[test]

@@ -50,3 +50,7 @@ export async function startSetupDownload(): Promise<SetupDownloadStatus> {
 export async function cleanupOllamaModels(): Promise<CleanupResult> {
   return invoke<CleanupResult>("cleanup_ollama_models");
 }
+
+export async function cancelScan(jobId: number): Promise<boolean> {
+  return invoke<boolean>("cancel_scan", { jobId });
+}

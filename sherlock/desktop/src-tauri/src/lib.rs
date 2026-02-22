@@ -8,9 +8,10 @@ mod runtime;
 mod scan;
 mod thumbnail;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use config::{prepare_dirs, resolve_paths, AppPaths};
@@ -57,6 +58,7 @@ struct AppState {
     paths: AppPaths,
     running_scan_jobs: Arc<Mutex<HashSet<i64>>>,
     setup_download: Arc<Mutex<SetupDownloadState>>,
+    cancel_flags: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>,
 }
 
 #[tauri::command]
@@ -187,6 +189,20 @@ fn get_runtime_status() -> RuntimeStatus {
 #[tauri::command]
 fn cleanup_ollama_models() -> Result<CleanupResult, String> {
     cleanup_ollama_models_impl().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn cancel_scan(job_id: i64, state: State<'_, AppState>) -> Result<bool, String> {
+    let flags = state
+        .cancel_flags
+        .lock()
+        .expect("cancel flags mutex poisoned");
+    if let Some(flag) = flags.get(&job_id) {
+        flag.store(true, Ordering::Relaxed);
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 fn compute_setup_status(app_state: &AppState) -> SetupStatus {
@@ -339,26 +355,47 @@ fn spawn_scan_worker_if_needed(app_state: AppState, job_id: i64) {
         guard.insert(job_id);
     }
 
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    {
+        let mut flags = app_state
+            .cancel_flags
+            .lock()
+            .expect("cancel flags mutex poisoned");
+        flags.insert(job_id, cancel_flag.clone());
+    }
+
     let scan_ctx = build_scan_context(&app_state.paths);
     let jobs = app_state.running_scan_jobs.clone();
+    let cancel_flags = app_state.cancel_flags.clone();
     let app_state_for_task = app_state.clone();
     tauri::async_runtime::spawn(async move {
-        let result =
-            tauri::async_runtime::spawn_blocking(move || scan::run_scan_job(&scan_ctx, job_id))
-                .await
-                .map_err(|e| AppError::Join(e.to_string()))
-                .and_then(|v| v);
+        let flag = cancel_flag;
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            scan::run_scan_job(&scan_ctx, job_id, Some(&flag))
+        })
+        .await
+        .map_err(|e| AppError::Join(e.to_string()))
+        .and_then(|v| v);
 
-        if let Err(err) = result {
-            let _ = db::fail_scan_job(
-                &app_state_for_task.paths.db_file,
-                job_id,
-                &format!("scan failed: {err}"),
-            );
+        match &result {
+            Ok(_) => {
+                if let Err(e) = cleanup_ollama_models_impl() {
+                    log::warn!("Auto-cleanup after scan failed: {e}");
+                }
+            }
+            Err(err) => {
+                let _ = db::fail_scan_job(
+                    &app_state_for_task.paths.db_file,
+                    job_id,
+                    &format!("scan failed: {err}"),
+                );
+            }
         }
 
         let mut guard = jobs.lock().expect("scan job mutex poisoned");
         guard.remove(&job_id);
+        let mut flags = cancel_flags.lock().expect("cancel flags mutex poisoned");
+        flags.remove(&job_id);
     });
 }
 
@@ -405,6 +442,7 @@ pub fn run() {
         paths,
         running_scan_jobs: Arc::new(Mutex::new(HashSet::new())),
         setup_download: Arc::new(Mutex::new(SetupDownloadState::idle())),
+        cancel_flags: Arc::new(Mutex::new(HashMap::new())),
     };
 
     tauri::Builder::default()
@@ -413,7 +451,13 @@ pub fn run() {
                 .level(log::LevelFilter::Info)
                 .build(),
         )
+        .plugin(tauri_plugin_dialog::init())
         .manage(app_state.clone())
+        .on_window_event(|_window, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                let _ = cleanup_ollama_models_impl();
+            }
+        })
         .setup(move |app| {
             for job in db::list_resumable_scan_jobs(&app_state.paths.db_file)? {
                 spawn_scan_worker_if_needed(app_state.clone(), job.id);
@@ -438,7 +482,8 @@ pub fn run() {
             get_scan_job,
             list_active_scans,
             get_runtime_status,
-            cleanup_ollama_models
+            cleanup_ollama_models,
+            cancel_scan
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

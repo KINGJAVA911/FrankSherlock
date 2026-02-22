@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use sha2::{Digest, Sha256};
@@ -44,14 +45,19 @@ pub fn start_or_resume_scan_job(db_path: &Path, root_path: &str) -> AppResult<Sc
     db::create_or_resume_scan_job(db_path, &canonical_root.display().to_string())
 }
 
-pub fn run_scan_job(ctx: &ScanContext, job_id: i64) -> AppResult<ScanSummary> {
-    run_scan_job_internal(ctx, job_id, None)
+pub fn run_scan_job(
+    ctx: &ScanContext,
+    job_id: i64,
+    cancel_flag: Option<&AtomicBool>,
+) -> AppResult<ScanSummary> {
+    run_scan_job_internal(ctx, job_id, None, cancel_flag)
 }
 
 fn run_scan_job_internal(
     ctx: &ScanContext,
     job_id: i64,
     max_files_for_test: Option<usize>,
+    cancel_flag: Option<&AtomicBool>,
 ) -> AppResult<ScanSummary> {
     let started = Instant::now();
     let db_path = &ctx.db_path;
@@ -99,6 +105,23 @@ fn run_scan_job_internal(
 
     // Phase 2: Processing loop
     for (i, probe) in probes.iter().enumerate().skip(start_index) {
+        if let Some(flag) = cancel_flag {
+            if flag.load(Ordering::Relaxed) {
+                db::cancel_scan_job(db_path, job_id)?;
+                return Ok(ScanSummary {
+                    root_id: job.root_id,
+                    root_path: root_path.display().to_string(),
+                    scanned: processed_files,
+                    added,
+                    modified,
+                    moved,
+                    unchanged,
+                    deleted: 0,
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                });
+            }
+        }
+
         if let Some(max) = max_files_for_test {
             if (i - start_index) >= max {
                 break;
@@ -468,7 +491,7 @@ mod tests {
             .expect("job");
         // For testing without Ollama, we use the internal function but skip classification
         // by using the old-style direct test
-        let ctx = make_scan_context(&db_path);
+        let _ctx = make_scan_context(&db_path);
         // We can't easily test with real classification in unit tests,
         // but we verify the incremental discovery logic here.
         let existing = db::load_existing_files(&db_path, first_job.root_id).expect("load");
@@ -527,6 +550,33 @@ mod tests {
             collect_image_probes_incremental(root_dir.path(), &existing_by_path).expect("probes");
         assert_eq!(probes.len(), 1);
         assert!(matches!(probes[0].status, FileStatus::Unchanged));
+    }
+
+    #[test]
+    fn cancel_flag_returns_early() {
+        let root_dir = tempfile::tempdir().expect("tempdir");
+        let db_dir = tempfile::tempdir().expect("dbdir");
+        let db_path = db_dir.path().join("index.sqlite");
+        db::init_database(&db_path).expect("init");
+
+        // Create image files
+        for name in &["a.jpg", "b.jpg", "c.jpg"] {
+            let img = root_dir.path().join(name);
+            let mut f = File::create(&img).expect("create");
+            f.write_all(format!("data-{name}").as_bytes()).expect("write");
+        }
+
+        let job = start_or_resume_scan_job(&db_path, root_dir.path().to_str().unwrap())
+            .expect("job");
+        let ctx = make_scan_context(&db_path);
+
+        // Set cancel flag before running
+        let flag = AtomicBool::new(true);
+        let result = run_scan_job_internal(&ctx, job.id, None, Some(&flag));
+        assert!(result.is_ok());
+        let summary = result.unwrap();
+        // Should return early with minimal processing
+        assert_eq!(summary.added, 0);
     }
 
     #[test]

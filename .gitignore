@@ -7,28 +7,9 @@ wheels/
 *.egg-info
 .venv/
 
-# Results (regenerable)
-results/
-
-# Large media files
-test_files/**/*.mp4
-test_files/**/*.avi
-test_files/**/*.mov
-test_files/**/*.mpg
-test_files/**/*.mp3
-test_files/**/*.mp2
-test_files/**/*.mpa
-test_files/**/*.jpg
-test_files/**/*.jpeg
-test_files/**/*.JPG
-test_files/**/*.png
-test_files/**/*.gif
-test_files/**/*.GIF
-test_files/**/*.pdf
-test_files/**/*.docx
-test_files/**/*.xlsx
-test_files/**/*.pptx
-test_files/**/@eaDir/
+# Research test files and results (not shipped, regenerable)
+_research_ab_test/test_files/
+_research_ab_test/results/
 
 # Synology metadata
 @eaDir/

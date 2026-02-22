@@ -101,7 +101,7 @@ fn ollama_generate(
         "model": model,
         "prompt": prompt,
         "stream": false,
-        "keep_alive": "20m",
+        "keep_alive": "5m",
         "options": {
             "temperature": 0.1,
             "num_predict": num_predict,
