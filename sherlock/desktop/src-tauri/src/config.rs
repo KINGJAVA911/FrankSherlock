@@ -118,6 +118,51 @@ pub fn save_user_config(config: &serde_json::Value) -> AppResult<()> {
     Ok(())
 }
 
+/// Expand `~`, canonicalize, and validate that the result is a directory.
+///
+/// Handles:
+/// - `~` and `~/...` (and `~\...` on Windows) expansion via `dirs::home_dir()`
+/// - Trailing slashes, `.`, `..`, symlinks (via `canonicalize()`)
+/// - Validates the resolved path is a directory
+pub fn expand_and_canonicalize(raw: &str) -> AppResult<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::InvalidPath("empty path".into()));
+    }
+
+    let expanded = if trimmed == "~" {
+        dirs::home_dir()
+            .ok_or_else(|| AppError::InvalidPath("cannot resolve home directory".into()))?
+    } else if let Some(rest) = trimmed.strip_prefix("~/") {
+        let home = dirs::home_dir()
+            .ok_or_else(|| AppError::InvalidPath("cannot resolve home directory".into()))?;
+        home.join(rest)
+    } else if cfg!(windows) {
+        if let Some(rest) = trimmed.strip_prefix("~\\") {
+            let home = dirs::home_dir()
+                .ok_or_else(|| AppError::InvalidPath("cannot resolve home directory".into()))?;
+            home.join(rest)
+        } else {
+            PathBuf::from(trimmed)
+        }
+    } else {
+        PathBuf::from(trimmed)
+    };
+
+    let canonical = expanded.canonicalize().map_err(|e| {
+        AppError::InvalidPath(format!("cannot resolve path '{}': {}", raw, e))
+    })?;
+
+    if !canonical.is_dir() {
+        return Err(AppError::InvalidPath(format!(
+            "not a directory: {}",
+            raw
+        )));
+    }
+
+    Ok(canonical)
+}
+
 pub fn canonical_root_path(path: &str) -> AppResult<PathBuf> {
     let root = Path::new(path);
     if !root.exists() {
@@ -150,6 +195,62 @@ mod tests {
         let paths = resolve_paths().expect("paths");
         assert_eq!(paths.base_dir, path);
         env::remove_var(DATA_DIR_ENV);
+    }
+
+    #[test]
+    fn expand_and_canonicalize_resolves_dot() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let result = expand_and_canonicalize(".").expect("dot");
+        assert_eq!(result, cwd);
+    }
+
+    #[test]
+    fn expand_and_canonicalize_strips_trailing_slash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let with_slash = format!("{}/", dir.path().display());
+        let result = expand_and_canonicalize(&with_slash).expect("trailing slash");
+        assert_eq!(result, dir.path().canonicalize().expect("canon"));
+    }
+
+    #[test]
+    fn expand_and_canonicalize_tilde() {
+        if let Some(home) = dirs::home_dir() {
+            let result = expand_and_canonicalize("~").expect("tilde");
+            assert_eq!(result, home.canonicalize().expect("canon"));
+        }
+    }
+
+    #[test]
+    fn expand_and_canonicalize_tilde_subdir() {
+        // Only run if home dir exists and is a directory
+        if let Some(home) = dirs::home_dir() {
+            if home.is_dir() {
+                // Just test that ~/. resolves to home
+                let result = expand_and_canonicalize("~/.").expect("tilde dot");
+                assert_eq!(result, home.canonicalize().expect("canon"));
+            }
+        }
+    }
+
+    #[test]
+    fn expand_and_canonicalize_nonexistent() {
+        let err = expand_and_canonicalize("/nonexistent_path_that_should_not_exist_12345");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn expand_and_canonicalize_empty() {
+        let err = expand_and_canonicalize("");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn expand_and_canonicalize_file_not_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("afile.txt");
+        std::fs::write(&file, "hello").expect("write");
+        let err = expand_and_canonicalize(file.to_str().unwrap());
+        assert!(err.is_err());
     }
 
     #[test]

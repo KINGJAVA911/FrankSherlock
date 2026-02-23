@@ -2,8 +2,9 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   addFilesToAlbum, copyFilesToClipboard, createAlbum, createSmartFolder,
-  deleteAlbum, deleteFiles, deleteSmartFolder, ensureDatabase, listAlbums,
-  listSmartFolders, removeRoot, renameFile, updateFileMetadata,
+  deleteAlbum, deleteFiles, deleteSmartFolder, ensureDatabase, getCliFolderPath,
+  listAlbums, listRoots, listSmartFolders, removeRoot, renameFile, startScan,
+  updateFileMetadata,
 } from "./api";
 import type {
   Album,
@@ -158,11 +159,62 @@ export default function App() {
     try { setSmartFolders(await listSmartFolders()); } catch { /* ignore */ }
   }
 
-  /* ── Extended initApp: also load albums + smart folders ── */
+  /* ── Extended initApp: also load albums + smart folders + CLI folder ── */
   const initApp = useCallback(async () => {
-    await scanManager.initApp();
+    const result = await scanManager.initApp();
     try { setAlbums(await listAlbums()); } catch { /* ignore */ }
     try { setSmartFolders(await listSmartFolders()); } catch { /* ignore */ }
+
+    // Handle CLI folder argument
+    if (!result) return;
+    const cliPath = await getCliFolderPath();
+    if (!cliPath) return;
+
+    const { roots: loadedRoots, scans, setupStatus, readOnly: isReadOnly } = result;
+    const matchingRoot = loadedRoots.find((r) => r.rootPath === cliPath);
+    const activeOrInterrupted = scans.filter(
+      (s) => s.status === "running" || s.status === "interrupted",
+    );
+
+    if (matchingRoot) {
+      // Root already exists — select it
+      setSelectedRootId(matchingRoot.id);
+
+      // Check for an interrupted scan on this specific root and resume it
+      const interruptedForRoot = activeOrInterrupted.find(
+        (s) => s.rootPath === cliPath && s.status === "interrupted",
+      );
+      if (interruptedForRoot && !isReadOnly && setupStatus.isReady) {
+        try {
+          const job = await startScan(cliPath);
+          scanManager.addTrackedJobId(job.id);
+        } catch { /* ignore — setup might not be ready */ }
+      }
+    } else if (!isReadOnly && setupStatus.isReady) {
+      // New folder — check if there are already running/interrupted scans
+      const hasOtherActive = activeOrInterrupted.length > 0;
+      if (hasOtherActive) {
+        // Other scans in progress — just add root (via startScan) without
+        // blocking, but still select it. The scan will queue alongside others.
+        // Actually, if other scans are interrupted (not running), we still
+        // start the new scan — interrupted scans need user action to resume.
+        const hasRunning = activeOrInterrupted.some((s) => s.status === "running");
+        if (hasRunning) {
+          // There are running scans — defer this one. Just notify user.
+          // We can't add the root without scanning, so skip for now.
+          return;
+        }
+      }
+      // No running scans (or only interrupted ones) — start scan for new folder
+      try {
+        const job = await startScan(cliPath);
+        scanManager.addTrackedJobId(job.id);
+        await scanManager.refreshRoots();
+        const updatedRoots = await listRoots();
+        const newRoot = updatedRoots.find((r) => r.rootPath === cliPath);
+        if (newRoot) setSelectedRootId(newRoot.id);
+      } catch { /* ignore — setup might not be ready */ }
+    }
   }, [scanManager.initApp]);
 
   useAppInit(initApp);

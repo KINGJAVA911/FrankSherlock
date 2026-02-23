@@ -34,6 +34,7 @@ struct AppState {
     running_scan_jobs: Arc<Mutex<HashSet<i64>>>,
     setup_download: Arc<Mutex<llm::DownloadState>>,
     cancel_flags: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>,
+    cli_folder_path: Option<String>,
 }
 
 #[tauri::command]
@@ -60,6 +61,11 @@ fn require_writable(state: &AppState) -> Result<(), String> {
 #[tauri::command]
 fn get_app_paths(state: State<'_, AppState>) -> Result<config::AppPathsView, String> {
     Ok(state.paths.view())
+}
+
+#[tauri::command]
+fn get_cli_folder_path(state: State<'_, AppState>) -> Option<String> {
+    state.cli_folder_path.clone()
 }
 
 #[tauri::command]
@@ -730,6 +736,16 @@ pub fn run() {
 
     let gpu_info = platform::gpu::detect_gpu_memory();
 
+    let cli_folder_path: Option<String> = std::env::args().nth(1).and_then(|raw| {
+        match config::expand_and_canonicalize(&raw) {
+            Ok(p) => Some(p.display().to_string()),
+            Err(e) => {
+                eprintln!("Invalid folder argument '{}': {}", raw, e);
+                None
+            }
+        }
+    });
+
     let app_state = AppState {
         paths,
         read_only,
@@ -737,6 +753,7 @@ pub fn run() {
         running_scan_jobs: Arc::new(Mutex::new(HashSet::new())),
         setup_download: Arc::new(Mutex::new(llm::DownloadState::idle())),
         cancel_flags: Arc::new(Mutex::new(HashMap::new())),
+        cli_folder_path,
     };
 
     tauri::Builder::default()
@@ -746,31 +763,17 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_dialog::init())
-        .manage(app_state.clone())
+        .manage(app_state)
         .on_window_event(|_window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let _ = llm::cleanup_loaded_models();
             }
         })
-        .setup(move |app| {
-            if !app_state.read_only {
-                // Don't auto-resume interrupted scans — let the frontend prompt the user.
-                // Only handle explicit CLI-arg scanning.
-                if let Some(root_path) = std::env::args().nth(1) {
-                    let state = app.state::<AppState>();
-                    let handle = app.handle().clone();
-                    if let Ok(job) =
-                        scan::start_or_resume_scan_job(&state.paths.db_file, &root_path)
-                    {
-                        spawn_scan_worker_if_needed(state.inner().clone(), &handle, job.id);
-                    }
-                }
-            }
-            Ok(())
-        })
+        // CLI folder handling is delegated to the frontend via get_cli_folder_path.
         .invoke_handler(tauri::generate_handler![
             app_health,
             get_app_paths,
+            get_cli_folder_path,
             ensure_database,
             parse_query_nl,
             get_setup_status,

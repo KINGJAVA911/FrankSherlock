@@ -126,7 +126,14 @@ export function useScanManager(cb: ScanManagerCallbacks) {
     }
   }, [trackedJobIds, cb, refreshRoots]);
 
-  async function initApp() {
+  type InitAppResult = {
+    roots: RootInfo[];
+    scans: ScanJobStatus[];
+    setupStatus: SetupStatus;
+    readOnly: boolean;
+  };
+
+  async function initApp(): Promise<InitAppResult | null> {
     try {
       const [db, setupStatus, runtimeStatus, scans, rootList, health] = await Promise.all([
         ensureDatabase(),
@@ -150,8 +157,10 @@ export function useScanManager(cb: ScanManagerCallbacks) {
       if (interrupted.length > 0) {
         cb.setShowResumeModal(true);
       }
+      return { roots: rootList, scans, setupStatus, readOnly: health.readOnly };
     } catch (err) {
       cb.setError(errorMessage(err));
+      return null;
     }
   }
 
@@ -232,6 +241,10 @@ export function useScanManager(cb: ScanManagerCallbacks) {
     await pollRuntimeAndScans();
   }
 
+  function addTrackedJobId(id: number) {
+    setTrackedJobIds((prev) => [...prev, id]);
+  }
+
   return {
     activeScans,
     trackedJobIds,
@@ -246,5 +259,6 @@ export function useScanManager(cb: ScanManagerCallbacks) {
     onSetupDownload,
     onRecheckSetup,
     refreshRoots,
+    addTrackedJobId,
   };
 }

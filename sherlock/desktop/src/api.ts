@@ -22,6 +22,10 @@ export async function appHealth(): Promise<HealthStatus> {
   return invoke<HealthStatus>("app_health");
 }
 
+export async function getCliFolderPath(): Promise<string | null> {
+  return invoke<string | null>("get_cli_folder_path");
+}
+
 export async function ensureDatabase(): Promise<DbStats> {
   return invoke<DbStats>("ensure_database");
 }
