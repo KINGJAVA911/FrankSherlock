@@ -20,6 +20,7 @@ describe("useSearch", () => {
     sortOrder: "desc" as const,
     isReady: true,
     onClearSelection: vi.fn(),
+    onReconcileSelection: vi.fn(),
   };
 
   beforeEach(() => {

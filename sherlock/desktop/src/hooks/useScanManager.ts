@@ -21,6 +21,23 @@ import type {
 } from "../types";
 import { basename, errorMessage } from "../utils";
 
+/** Shallow-compare two scan arrays to avoid unnecessary re-renders. */
+function scansChanged(prev: ScanJobStatus[], next: ScanJobStatus[]): boolean {
+  if (prev.length !== next.length) return true;
+  for (let i = 0; i < prev.length; i++) {
+    if (
+      prev[i].id !== next[i].id ||
+      prev[i].status !== next[i].status ||
+      prev[i].processedFiles !== next[i].processedFiles ||
+      prev[i].totalFiles !== next[i].totalFiles ||
+      prev[i].added !== next[i].added ||
+      prev[i].modified !== next[i].modified ||
+      prev[i].moved !== next[i].moved
+    ) return true;
+  }
+  return false;
+}
+
 const PAGE_SIZE = 80;
 const MAX_ITEMS = 400;
 
@@ -33,7 +50,7 @@ type ScanManagerCallbacks = {
   setShowResumeModal: (show: boolean) => void;
   setNotice: (msg: string) => void;
   setError: (msg: string) => void;
-  runSearch: (offset: number, append: boolean, limitOverride?: number) => Promise<void>;
+  runSearch: (offset: number, append: boolean, limitOverride?: number, preserveSelection?: boolean) => Promise<void>;
   itemsLength: () => number;
 };
 
@@ -63,7 +80,7 @@ export function useScanManager(cb: ScanManagerCallbacks) {
       ]);
       cb.setSetup(setupStatus);
       cb.setRuntime(runtimeStatus);
-      setActiveScans(scans);
+      setActiveScans((prev) => scansChanged(prev, scans) ? scans : prev);
 
       if (ids.length === 0) return;
 
@@ -90,7 +107,7 @@ export function useScanManager(cb: ScanManagerCallbacks) {
       if (anyRunning && maxProcessed > lastProcessedRef.current) {
         lastProcessedRef.current = maxProcessed;
         const liveLimit = Math.max(PAGE_SIZE, Math.min(cb.itemsLength(), MAX_ITEMS));
-        void cb.runSearch(0, false, liveLimit);
+        void cb.runSearch(0, false, liveLimit, true);
         void refreshRoots();
       }
 

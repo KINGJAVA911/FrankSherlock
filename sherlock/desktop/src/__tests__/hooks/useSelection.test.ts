@@ -48,4 +48,13 @@ describe("useSelection", () => {
     expect(result.current.focusIndex).toBeNull();
     expect(result.current.anchorIndex).toBeNull();
   });
+
+  it("replaceSelection sets indices, focus, and anchor atomically", () => {
+    const { result } = renderHook(() => useSelection());
+    act(() => result.current.selectOnly(1));
+    act(() => result.current.replaceSelection(new Set([2, 4]), 4, 2));
+    expect(result.current.selectedIndices).toEqual(new Set([2, 4]));
+    expect(result.current.focusIndex).toBe(4);
+    expect(result.current.anchorIndex).toBe(2);
+  });
 });

@@ -247,3 +247,8 @@
   font-size: var(--font-size-sm);
   color: var(--text-primary);
 }
+
+.sidebar-scan-eta {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}

@@ -41,6 +41,15 @@ export function useSelection() {
     setAnchorIndex(null);
   }, []);
 
+  const replaceSelection = useCallback(
+    (indices: Set<number>, focus: number | null, anchor: number | null) => {
+      setSelectedIndices(indices);
+      setFocusIndex(focus);
+      setAnchorIndex(anchor);
+    },
+    [],
+  );
+
   return {
     selectedIndices,
     focusIndex,
@@ -50,5 +59,6 @@ export function useSelection() {
     rangeSelect,
     selectAll,
     clearSelection,
+    replaceSelection,
   };
 }

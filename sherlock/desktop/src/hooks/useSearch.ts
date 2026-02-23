@@ -12,28 +12,38 @@ type UseSearchParams = {
   sortOrder: SortOrder;
   isReady: boolean;
   onClearSelection: () => void;
+  onReconcileSelection: (oldItems: SearchItem[], newItems: SearchItem[]) => void;
 };
 
-export function useSearch({ query, selectedMediaType, selectedRootId, sortBy, sortOrder, isReady, onClearSelection }: UseSearchParams) {
+export function useSearch({ query, selectedMediaType, selectedRootId, sortBy, sortOrder, isReady, onClearSelection, onReconcileSelection }: UseSearchParams) {
   const [items, setItems] = useState<SearchItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const requestIdRef = useRef(0);
+  const itemsRef = useRef<SearchItem[]>([]);
+
+  // Keep ref in sync for use in applySearchResponse
+  itemsRef.current = items;
 
   const canLoadMore = items.length < total;
 
-  function applySearchResponse(response: SearchResponse, append: boolean) {
+  function applySearchResponse(response: SearchResponse, append: boolean, preserveSelection: boolean) {
     setTotal(response.total);
     if (append) {
       setItems((prev) => [...prev, ...response.items]);
     } else {
+      const oldItems = itemsRef.current;
       setItems(response.items);
-      onClearSelection();
+      if (preserveSelection) {
+        onReconcileSelection(oldItems, response.items);
+      } else {
+        onClearSelection();
+      }
     }
   }
 
-  const runSearch = useCallback(async (offset: number, append: boolean, limitOverride?: number) => {
+  const runSearch = useCallback(async (offset: number, append: boolean, limitOverride?: number, preserveSelection?: boolean) => {
     const reqId = ++requestIdRef.current;
     if (append) setLoadingMore(true);
     else setLoading(true);
@@ -48,16 +58,15 @@ export function useSearch({ query, selectedMediaType, selectedRootId, sortBy, so
         sortOrder,
       });
       if (reqId !== requestIdRef.current) return;
-      applySearchResponse(response, append);
+      applySearchResponse(response, append, preserveSelection ?? false);
     } catch (err) {
       if (reqId !== requestIdRef.current) return;
-      // Error handling delegated to caller via return
     } finally {
       if (reqId !== requestIdRef.current) return;
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [query, selectedMediaType, selectedRootId, sortBy, sortOrder, onClearSelection]);
+  }, [query, selectedMediaType, selectedRootId, sortBy, sortOrder, onClearSelection, onReconcileSelection]);
 
   const onLoadMore = useCallback(async () => {
     if (!canLoadMore || loadingMore) return;

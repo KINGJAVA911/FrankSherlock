@@ -77,8 +77,38 @@ export default function App() {
 
   const {
     selectedIndices, focusIndex, anchorIndex,
-    selectOnly, toggleSelect, rangeSelect, selectAll, clearSelection,
+    selectOnly, toggleSelect, rangeSelect, selectAll, clearSelection, replaceSelection,
   } = useSelection();
+
+  const onReconcileSelection = useCallback((oldItems: SearchItem[], newItems: SearchItem[]) => {
+    if (selectedIndices.size === 0) return;
+    // Map old indices → item IDs
+    const selectedIds = new Set<number>();
+    let focusId: number | null = null;
+    let anchorId: number | null = null;
+    for (const idx of selectedIndices) {
+      if (idx < oldItems.length) {
+        selectedIds.add(oldItems[idx].id);
+      }
+    }
+    if (focusIndex !== null && focusIndex < oldItems.length) {
+      focusId = oldItems[focusIndex].id;
+    }
+    if (anchorIndex !== null && anchorIndex < oldItems.length) {
+      anchorId = oldItems[anchorIndex].id;
+    }
+    // Map IDs → new indices
+    const newSelection = new Set<number>();
+    let newFocus: number | null = null;
+    let newAnchor: number | null = null;
+    for (let i = 0; i < newItems.length; i++) {
+      const id = newItems[i].id;
+      if (selectedIds.has(id)) newSelection.add(i);
+      if (id === focusId) newFocus = i;
+      if (id === anchorId) newAnchor = i;
+    }
+    replaceSelection(newSelection, newFocus, newAnchor);
+  }, [selectedIndices, focusIndex, anchorIndex, replaceSelection]);
 
   const {
     items, total, loading, loadingMore, canLoadMore, runSearch, onLoadMore,
@@ -90,6 +120,7 @@ export default function App() {
     sortOrder,
     isReady: !setup || setup.isReady,
     onClearSelection: clearSelection,
+    onReconcileSelection,
   });
 
   const scanManager = useScanManager({
