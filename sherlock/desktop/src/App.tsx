@@ -29,7 +29,8 @@ import type {
   SetupStatus
 } from "./types";
 
-const PAGE_SIZE = 40;
+const PAGE_SIZE = 80;
+const MAX_ITEMS = 400;
 const POLL_MS = 1200;
 const appWindow = getCurrentWindow();
 
@@ -49,7 +50,8 @@ export default function App() {
   const [activeScans, setActiveScans] = useState<ScanJobStatus[]>([]);
   const [trackedJobId, setTrackedJobId] = useState<number | null>(null);
   const [latestJob, setLatestJob] = useState<ScanJobStatus | null>(null);
-  const [previewItem, setPreviewItem] = useState<SearchItem | null>(null);
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [zoom, setZoom] = useState(1.25);
   const [roots, setRoots] = useState<RootInfo[]>([]);
@@ -60,12 +62,19 @@ export default function App() {
   const requestIdRef = useRef(0);
   const configRef = useRef<Record<string, unknown>>({});
   const lastProcessedRef = useRef(0);
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const gridRef = useRef<HTMLDivElement>(null);
+  const columnsRef = useRef(1);
 
   const canLoadMore = items.length < total;
   const mediaTypeOptions = useMemo(
     () => ["", "document", "anime", "screenshot", "photo", "artwork", "manga", "other"],
     []
   );
+
+  const previewItem = previewOpen && selectedIndex != null && selectedIndex < items.length
+    ? items[selectedIndex]
+    : null;
 
   const currentScan =
     (trackedJobId ? activeScans.find((job) => job.id === trackedJobId) : null) ??
@@ -183,22 +192,116 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [query, minConfidence, selectedMediaType, selectedRootId, setup?.isReady]);
 
-  // Keyboard: Esc closes preview
+  // IntersectionObserver for infinite scroll
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting) {
+          void onLoadMore();
+        }
+      },
+      { rootMargin: "200px" }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [items.length, total, loadingMore]);
+
+  // ResizeObserver on grid to calculate columns
+  useEffect(() => {
+    const el = gridRef.current;
+    if (!el) return;
+    const gap = 6;
+    const minItemWidth = 220;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const w = entry.contentRect.width;
+        columnsRef.current = Math.max(1, Math.floor((w + gap) / (minItemWidth + gap)));
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  // Unified keyboard handler: navigation, preview toggle, escape
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+
       if (e.key === "Escape") {
         if (showResumeModal) {
           setShowResumeModal(false);
         } else if (confirmDeleteRoot) {
           setConfirmDeleteRoot(null);
-        } else if (previewItem) {
-          setPreviewItem(null);
+        } else if (previewOpen) {
+          setPreviewOpen(false);
+        } else if (selectedIndex != null) {
+          setSelectedIndex(null);
+        }
+        return;
+      }
+
+      // Ignore nav keys when non-preview modals are open
+      if (showResumeModal || confirmDeleteRoot || (setup && !setup.isReady)) return;
+
+      const cols = columnsRef.current;
+
+      if (e.key === "ArrowRight") {
+        e.preventDefault();
+        setSelectedIndex((prev) => {
+          const next = prev == null ? 0 : Math.min(prev + 1, items.length - 1);
+          scrollTileIntoView(next);
+          autoLoadIfNeeded(next);
+          return next;
+        });
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        setSelectedIndex((prev) => {
+          const next = prev == null ? 0 : Math.max(prev - 1, 0);
+          scrollTileIntoView(next);
+          return next;
+        });
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSelectedIndex((prev) => {
+          const next = prev == null ? 0 : Math.min(prev + cols, items.length - 1);
+          scrollTileIntoView(next);
+          autoLoadIfNeeded(next);
+          return next;
+        });
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSelectedIndex((prev) => {
+          const next = prev == null ? 0 : Math.max(prev - cols, 0);
+          scrollTileIntoView(next);
+          return next;
+        });
+      } else if (e.key === " ") {
+        e.preventDefault();
+        if (selectedIndex != null) {
+          setPreviewOpen((prev) => !prev);
         }
       }
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [previewItem, confirmDeleteRoot, showResumeModal]);
+  }, [selectedIndex, previewOpen, items.length, showResumeModal, confirmDeleteRoot, setup?.isReady]);
+
+  function scrollTileIntoView(index: number) {
+    const grid = gridRef.current;
+    if (!grid) return;
+    const tile = grid.children[index] as HTMLElement | undefined;
+    tile?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+
+  function autoLoadIfNeeded(index: number) {
+    const cols = columnsRef.current;
+    if (index >= items.length - cols * 2 && canLoadMore) {
+      void onLoadMore();
+    }
+  }
 
   // Auto-dismiss toasts
   useEffect(() => {
@@ -231,7 +334,8 @@ export default function App() {
         // Live-refresh grid: re-run search when new files are processed
         if (trackedJob.status === "running" && trackedJob.processedFiles > lastProcessedRef.current) {
           lastProcessedRef.current = trackedJob.processedFiles;
-          void runSearch(0, false);
+          const liveLimit = Math.max(PAGE_SIZE, Math.min(items.length, MAX_ITEMS));
+          void runSearch(0, false, liveLimit);
           void refreshRoots();
         }
 
@@ -258,14 +362,14 @@ export default function App() {
     }
   }
 
-  async function runSearch(offset: number, append: boolean) {
+  async function runSearch(offset: number, append: boolean, limitOverride?: number) {
     const reqId = ++requestIdRef.current;
     if (append) setLoadingMore(true);
     else setLoading(true);
     try {
       const response = await searchImages({
         query,
-        limit: PAGE_SIZE,
+        limit: limitOverride ?? PAGE_SIZE,
         offset,
         minConfidence: minConfidence > 0 ? minConfidence : undefined,
         mediaTypes: selectedMediaType ? [selectedMediaType] : undefined,
@@ -285,7 +389,17 @@ export default function App() {
 
   function applySearchResponse(response: SearchResponse, append: boolean) {
     setTotal(response.total);
-    setItems((prev) => (append ? [...prev, ...response.items] : response.items));
+    if (append) {
+      setItems((prev) => [...prev, ...response.items]);
+    } else {
+      setItems(response.items);
+      // Clamp selection to new range or reset
+      setSelectedIndex((prev) => {
+        if (prev == null) return null;
+        if (response.items.length === 0) return null;
+        return prev < response.items.length ? prev : null;
+      });
+    }
   }
 
   async function onLoadMore() {
@@ -395,18 +509,35 @@ export default function App() {
     await pollRuntimeAndScans();
   }
 
+  function onWindowClose() {
+    // Fire cleanup best-effort, don't wait — ollama commands can hang
+    cleanupOllamaModels().catch(() => {});
+    void appWindow.destroy();
+  }
+
   function thumbnailSrc(item: SearchItem): string | null {
     if (item.thumbnailPath) {
-      const src = convertFileSrc(item.thumbnailPath);
-      console.log("[thumb_debug]", { id: item.id, thumbnailPath: item.thumbnailPath, src });
-      return src;
+      return convertFileSrc(item.thumbnailPath);
     }
-    console.log("[thumb_debug] NO thumb_path for", item.id, item.relPath);
     return null;
   }
 
   function scanForRoot(rootId: number): ScanJobStatus | undefined {
     return activeScans.find((s) => s.rootId === rootId && s.status === "running");
+  }
+
+  function onTileClick(idx: number) {
+    setSelectedIndex(idx);
+  }
+
+  function onTileDoubleClick(idx: number) {
+    setSelectedIndex(idx);
+    setPreviewOpen(true);
+  }
+
+  function fileName(relPath: string): string {
+    const i = relPath.lastIndexOf("/");
+    return i >= 0 ? relPath.slice(i + 1) : relPath;
   }
 
   const scanProgress = currentScan?.totalFiles
@@ -489,11 +620,33 @@ export default function App() {
 
       {/* ── Preview Modal ── */}
       {previewItem && (
-        <div className="modal-overlay preview-overlay" onClick={() => setPreviewItem(null)} role="dialog" aria-modal="true">
+        <div className="modal-overlay preview-overlay" onClick={() => setPreviewOpen(false)} role="dialog" aria-modal="true">
           <div className="preview-modal" onClick={(e) => e.stopPropagation()}>
-            <button className="preview-close" onClick={() => setPreviewItem(null)} type="button" aria-label="Close preview">
+            <button className="preview-close" onClick={() => setPreviewOpen(false)} type="button" aria-label="Close preview">
               &times;
             </button>
+            {selectedIndex != null && selectedIndex > 0 && (
+              <button
+                className="preview-nav preview-nav-left"
+                onClick={() => { setSelectedIndex((prev) => Math.max(0, (prev ?? 1) - 1)); }}
+                type="button"
+                aria-label="Previous image"
+              >&#8249;</button>
+            )}
+            {selectedIndex != null && selectedIndex < items.length - 1 && (
+              <button
+                className="preview-nav preview-nav-right"
+                onClick={() => {
+                  setSelectedIndex((prev) => {
+                    const next = Math.min(items.length - 1, (prev ?? 0) + 1);
+                    autoLoadIfNeeded(next);
+                    return next;
+                  });
+                }}
+                type="button"
+                aria-label="Next image"
+              >&#8250;</button>
+            )}
             <div className="preview-image-wrap">
               <img src={convertFileSrc(previewItem.absPath)} alt={previewItem.relPath} />
             </div>
@@ -537,7 +690,7 @@ export default function App() {
         <div className="titlebar-controls">
           <button type="button" onClick={() => appWindow.minimize()} aria-label="Minimize">&#x2500;</button>
           <button type="button" onClick={() => appWindow.toggleMaximize()} aria-label="Maximize">&#x25A1;</button>
-          <button type="button" className="close" onClick={() => appWindow.close()} aria-label="Close">&#x2715;</button>
+          <button type="button" className="close" onClick={onWindowClose} aria-label="Close">&#x2715;</button>
         </div>
       </div>
 
@@ -701,37 +854,36 @@ export default function App() {
               {isScanning && <span className="scanning-indicator">Scanning...</span>}
             </div>
 
-            <div className="grid" role="list">
-              {items.map((item) => {
+            <div className="grid" role="list" ref={gridRef}>
+              {items.map((item, idx) => {
                 const thumb = thumbnailSrc(item);
+                const isSelected = selectedIndex === idx;
                 return (
                   <article
                     key={item.id}
-                    className="tile"
+                    className={`tile${isSelected ? " tile-selected" : ""}`}
                     role="listitem"
-                    tabIndex={0}
-                    onClick={() => setPreviewItem(item)}
-                    onKeyDown={(e) => {
-                      if (e.key === " " || e.key === "Enter") {
-                        e.preventDefault();
-                        setPreviewItem(item);
-                      }
-                    }}
+                    onClick={() => onTileClick(idx)}
+                    onDoubleClick={() => onTileDoubleClick(idx)}
                   >
-                    <div className="thumb">
+                    <div className="tile-thumb">
                       {thumb ? (
                         <img
                           src={thumb}
                           alt={item.relPath}
                           loading="lazy"
-                          onError={(e) => console.error("[thumb_error]", item.id, item.relPath, thumb, e)}
                         />
                       ) : (
-                        <span className="badge">{item.mediaType}</span>
+                        <div className="tile-thumb-placeholder">
+                          <span className="badge">{item.mediaType}</span>
+                        </div>
                       )}
                     </div>
-                    <div className="tile-body">
-                      <h3 title={item.relPath}>{item.relPath}</h3>
+                    <div className="tile-filename">
+                      <span>{fileName(item.relPath)}</span>
+                    </div>
+                    <div className="tile-hover-overlay">
+                      <h3>{fileName(item.relPath)}</h3>
                       <p>{item.description || "No description yet"}</p>
                       <div className="tile-meta">
                         <span className="badge">{item.mediaType}</span>
@@ -744,10 +896,8 @@ export default function App() {
             </div>
 
             {canLoadMore && (
-              <div className="load-more">
-                <button type="button" onClick={onLoadMore} disabled={loadingMore}>
-                  {loadingMore ? "Loading..." : `Load more (${items.length} / ${total})`}
-                </button>
+              <div ref={sentinelRef} className="load-sentinel">
+                {loadingMore && <span>Loading...</span>}
               </div>
             )}
           </div>
