@@ -14,3 +14,13 @@
 .statusbar .spacer {
   flex: 1;
 }
+
+.statusbar-clickable {
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+.statusbar-clickable:hover {
+  color: var(--text-primary);
+}

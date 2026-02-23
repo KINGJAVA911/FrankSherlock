@@ -1,0 +1,75 @@
+/* ── Model info modal ────────────────────────────────────── */
+.model-info-modal {
+  width: min(520px, 100%);
+}
+
+.model-info-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.model-info-section h4 {
+  margin: 0 0 6px;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.model-info-section dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  margin: 0;
+  font-size: var(--font-size-sm);
+}
+
+.model-info-section dt {
+  color: var(--text-secondary);
+}
+
+.model-info-section dd {
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.model-tag {
+  font-family: var(--font-mono, monospace);
+  background: var(--bg-base);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+  font-size: var(--font-size-sm);
+}
+
+.model-missing {
+  border-color: var(--status-error, #d32f2f);
+  color: var(--status-error, #d32f2f);
+}
+
+.model-active {
+  margin-left: 6px;
+  font-size: 0.7rem;
+  color: var(--status-success, #4caf50);
+  text-transform: uppercase;
+}
+
+.model-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.model-list li {
+  display: flex;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.model-empty {
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  margin: 0;
+}

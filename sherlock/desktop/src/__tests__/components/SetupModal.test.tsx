@@ -14,6 +14,9 @@ const mockSetup: SetupStatus = {
   pythonAvailable: false,
   pythonVersion: null,
   suryaVenvOk: false,
+  recommendedModel: "qwen2.5vl:7b",
+  modelTier: "medium",
+  modelSelectionReason: "NVIDIA GPU (24 GiB VRAM) — 7b is optimal",
 };
 
 describe("SetupModal", () => {
@@ -43,6 +46,16 @@ describe("SetupModal", () => {
     render(<SetupModal setup={mockSetup} onRecheck={() => {}} onDownload={onDownload} />);
     await user.click(screen.getByText("Download model"));
     expect(onDownload).toHaveBeenCalledOnce();
+  });
+
+  it("shows model tier and recommended model", () => {
+    render(<SetupModal setup={mockSetup} onRecheck={() => {}} onDownload={() => {}} />);
+    expect(screen.getByText(/Model \(medium\)/)).toBeInTheDocument();
+    const modelTexts = screen.getAllByText("qwen2.5vl:7b");
+    expect(modelTexts.length).toBeGreaterThanOrEqual(1);
+    // The model name with the title attribute is the recommended model display
+    const recommended = modelTexts.find((el) => el.getAttribute("title"));
+    expect(recommended).toBeTruthy();
   });
 
   it("disables download button when running", () => {

@@ -21,8 +21,8 @@ export default function SetupModal({ setup, onRecheck, onDownload }: Props) {
             <p>{setup.ollamaAvailable ? "Running" : "Not detected"}</p>
           </div>
           <div>
-            <strong>Required</strong>
-            <p>{setup.requiredModels.join(", ")}</p>
+            <strong>Model ({setup.modelTier})</strong>
+            <p title={setup.modelSelectionReason}>{setup.recommendedModel}</p>
           </div>
           <div>
             <strong>Missing</strong>

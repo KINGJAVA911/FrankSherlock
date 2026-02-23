@@ -183,6 +183,8 @@ pub fn database_stats(db_path: &Path) -> AppResult<DbStats> {
     Ok(DbStats {
         roots: roots as u64,
         files: files as u64,
+        db_size_bytes: 0,
+        thumbs_size_bytes: 0,
     })
 }
 
@@ -851,37 +853,43 @@ pub fn get_file_path_info(
     .map_err(AppError::from)
 }
 
-pub fn delete_files_by_id(
+/// Collect file info needed for deletion without mutating the DB.
+/// Returns `(file_id, abs_path, thumb_path)` for each existing, non-deleted file.
+pub fn collect_files_for_delete(
     db_path: &Path,
     file_ids: &[i64],
-) -> AppResult<Vec<crate::models::DeletedFileInfo>> {
-    use crate::models::DeletedFileInfo;
-
+) -> AppResult<Vec<(i64, String, Option<String>)>> {
     let conn = open_conn(db_path)?;
-    let tx = conn.unchecked_transaction()?;
-    let mut deleted = Vec::new();
-
+    let mut results = Vec::new();
     for &fid in file_ids {
-        let info: Option<(String, Option<String>)> = tx
+        let info: Option<(String, Option<String>)> = conn
             .query_row(
                 "SELECT abs_path, thumb_path FROM files WHERE id = ?1 AND deleted_at IS NULL",
                 params![fid],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .ok();
-
         if let Some((abs_path, thumb_path)) = info {
-            tx.execute("DELETE FROM files_fts WHERE rowid = ?1", params![fid])?;
-            tx.execute("DELETE FROM files WHERE id = ?1", params![fid])?;
-            deleted.push(DeletedFileInfo {
-                abs_path,
-                thumb_path,
-            });
+            results.push((fid, abs_path, thumb_path));
         }
     }
+    Ok(results)
+}
 
+/// Delete file records from DB for the given ids (FTS + files table).
+/// Only call this for files that have already been removed from the filesystem.
+pub fn delete_file_records(db_path: &Path, file_ids: &[i64]) -> AppResult<()> {
+    if file_ids.is_empty() {
+        return Ok(());
+    }
+    let conn = open_conn(db_path)?;
+    let tx = conn.unchecked_transaction()?;
+    for &fid in file_ids {
+        tx.execute("DELETE FROM files_fts WHERE rowid = ?1", params![fid])?;
+        tx.execute("DELETE FROM files WHERE id = ?1", params![fid])?;
+    }
     tx.commit()?;
-    Ok(deleted)
+    Ok(())
 }
 
 pub fn rename_file_record(
@@ -1983,7 +1991,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_delete_files_by_id() {
+    fn test_collect_and_delete_files() {
         let (_dir, db_path) = test_db_path();
         init_database(&db_path).expect("init");
         let root_id = upsert_root(&db_path, "/tmp/demo").expect("root");
@@ -1995,12 +2003,17 @@ mod tests {
         let _id3 = upsert_file_record(&db_path, &sample_record(root_id, "c.jpg", "fp-c"))
             .expect("upsert");
 
-        let deleted = delete_files_by_id(&db_path, &[id1, id2]).expect("delete");
-        assert_eq!(deleted.len(), 2);
+        // Phase 1: collect — DB is not mutated
+        let infos = collect_files_for_delete(&db_path, &[id1, id2]).expect("collect");
+        assert_eq!(infos.len(), 2);
+        assert_eq!(database_stats(&db_path).expect("stats").files, 3); // still 3
+
+        // Phase 2: delete records
+        let ids: Vec<i64> = infos.iter().map(|(fid, _, _)| *fid).collect();
+        delete_file_records(&db_path, &ids).expect("delete");
 
         // Verify files are gone from DB
-        let stats = database_stats(&db_path).expect("stats");
-        assert_eq!(stats.files, 1);
+        assert_eq!(database_stats(&db_path).expect("stats").files, 1);
 
         // Verify FTS entries are cleaned up
         let conn = open_conn(&db_path).expect("open");
@@ -2011,11 +2024,39 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_files_by_id_nonexistent() {
+    fn test_collect_files_nonexistent() {
         let (_dir, db_path) = test_db_path();
         init_database(&db_path).expect("init");
-        let deleted = delete_files_by_id(&db_path, &[999, 1000]).expect("delete");
-        assert_eq!(deleted.len(), 0);
+        let infos = collect_files_for_delete(&db_path, &[999, 1000]).expect("collect");
+        assert_eq!(infos.len(), 0);
+    }
+
+    #[test]
+    fn test_delete_file_records_empty() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        // Deleting zero ids should be a no-op
+        delete_file_records(&db_path, &[]).expect("delete empty");
+    }
+
+    #[test]
+    fn test_partial_delete_preserves_remaining() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/demo").expect("root");
+
+        let id1 = upsert_file_record(&db_path, &sample_record(root_id, "a.jpg", "fp-a"))
+            .expect("upsert");
+        let id2 = upsert_file_record(&db_path, &sample_record(root_id, "b.jpg", "fp-b"))
+            .expect("upsert");
+
+        // Only delete one — simulates partial filesystem success
+        delete_file_records(&db_path, &[id1]).expect("delete");
+        assert_eq!(database_stats(&db_path).expect("stats").files, 1);
+
+        // The remaining file should still be accessible
+        let (abs, _, _) = get_file_path_info(&db_path, id2).expect("info");
+        assert_eq!(abs, "/tmp/demo/b.jpg");
     }
 
     #[test]

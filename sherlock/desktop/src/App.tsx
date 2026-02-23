@@ -26,6 +26,7 @@ import ConfirmDeleteModal from "./components/modals/ConfirmDeleteModal";
 import ConfirmFileDeleteModal from "./components/modals/ConfirmFileDeleteModal";
 import RenameModal from "./components/modals/RenameModal";
 import HelpModal from "./components/modals/HelpModal";
+import ModelInfoModal from "./components/modals/ModelInfoModal";
 import { useToast } from "./hooks/useToast";
 import { useUserConfig } from "./hooks/useUserConfig";
 import { useGridColumns } from "./hooks/useGridColumns";
@@ -59,6 +60,7 @@ export default function App() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [confirmDeleteFiles, setConfirmDeleteFiles] = useState<SearchItem[] | null>(null);
   const [renameItem, setRenameItem] = useState<SearchItem | null>(null);
+  const [showModelInfo, setShowModelInfo] = useState(false);
 
   /* ── Refs ── */
   const sentinelRef = useRef<HTMLDivElement>(null);
@@ -290,6 +292,9 @@ export default function App() {
         />
       )}
       {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
+      {showModelInfo && runtime && (
+        <ModelInfoModal runtime={runtime} setup={setup} onClose={() => setShowModelInfo(false)} />
+      )}
       {confirmDeleteRoot && (
         <ConfirmDeleteModal
           root={confirmDeleteRoot}
@@ -387,6 +392,7 @@ export default function App() {
         isScanning={isScanning}
         runningScansCount={runningScansCount}
         selectedCount={selectedIndices.size}
+        onShowModelInfo={() => setShowModelInfo(true)}
       />
 
       {/* ── Toasts ── */}

@@ -2,6 +2,7 @@ mod classify;
 mod config;
 mod db;
 mod error;
+mod llm;
 mod models;
 mod platform;
 mod query_parser;
@@ -10,13 +11,11 @@ mod scan;
 mod thumbnail;
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use config::{prepare_dirs, resolve_paths, AppPaths};
-use error::{AppError, AppResult};
+use error::AppError;
 use models::{
     CleanupResult, DeleteFilesResult, HealthCheckOutcome, HealthStatus, PurgeResult,
     RenameFileResult, RootInfo, RuntimeStatus, ScanJobStatus, SearchRequest, SearchResponse,
@@ -25,42 +24,13 @@ use models::{
 use tauri::Manager;
 use tauri::State;
 
-const REQUIRED_OLLAMA_MODELS: &[&str] = &["qwen2.5vl:7b"];
-
-#[derive(Clone, Debug)]
-struct SetupDownloadState {
-    status: String,
-    model: Option<String>,
-    progress_pct: f32,
-    message: String,
-}
-
-impl SetupDownloadState {
-    fn idle() -> Self {
-        Self {
-            status: "idle".to_string(),
-            model: None,
-            progress_pct: 0.0,
-            message: "No download in progress".to_string(),
-        }
-    }
-
-    fn as_view(&self) -> SetupDownloadStatus {
-        SetupDownloadStatus {
-            status: self.status.clone(),
-            model: self.model.clone(),
-            progress_pct: self.progress_pct,
-            message: self.message.clone(),
-        }
-    }
-}
-
 #[derive(Clone)]
 struct AppState {
     paths: AppPaths,
     read_only: bool,
+    gpu_info: platform::gpu::GpuInfo,
     running_scan_jobs: Arc<Mutex<HashSet<i64>>>,
-    setup_download: Arc<Mutex<SetupDownloadState>>,
+    setup_download: Arc<Mutex<llm::DownloadState>>,
     cancel_flags: Arc<Mutex<HashMap<i64, Arc<AtomicBool>>>>,
 }
 
@@ -92,12 +62,30 @@ fn get_app_paths(state: State<'_, AppState>) -> Result<config::AppPathsView, Str
 
 #[tauri::command]
 fn ensure_database(state: State<'_, AppState>) -> Result<models::DbStats, String> {
-    if state.read_only {
-        return db::database_stats(&state.paths.db_file).map_err(|e| e.to_string());
-    }
-    db::init_database(&state.paths.db_file)
-        .and_then(|_| db::database_stats(&state.paths.db_file))
-        .map_err(|e| e.to_string())
+    let mut stats = if state.read_only {
+        db::database_stats(&state.paths.db_file).map_err(|e| e.to_string())?
+    } else {
+        db::init_database(&state.paths.db_file)
+            .and_then(|_| db::database_stats(&state.paths.db_file))
+            .map_err(|e| e.to_string())?
+    };
+    stats.db_size_bytes = file_size_bytes(&state.paths.db_file);
+    stats.thumbs_size_bytes = dir_size_bytes(&state.paths.thumbnails_dir);
+    Ok(stats)
+}
+
+fn file_size_bytes(path: &std::path::Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+fn dir_size_bytes(path: &std::path::Path) -> u64 {
+    walkdir::WalkDir::new(path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| e.metadata().ok())
+        .map(|m| m.len())
+        .sum()
 }
 
 #[tauri::command]
@@ -149,7 +137,7 @@ fn start_setup_download(state: State<'_, AppState>) -> Result<SetupDownloadStatu
 
     let setup_state = state.setup_download.clone();
     tauri::async_runtime::spawn(async move {
-        run_model_download(setup_state, model).await;
+        llm::management::run_model_download(setup_state, model).await;
     });
 
     Ok(state
@@ -212,7 +200,7 @@ fn get_runtime_status() -> RuntimeStatus {
 
 #[tauri::command]
 fn cleanup_ollama_models() -> Result<CleanupResult, String> {
-    cleanup_ollama_models_impl().map_err(|e| e.to_string())
+    llm::cleanup_loaded_models().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -250,23 +238,40 @@ fn copy_files_to_clipboard(paths: Vec<String>) -> Result<(), String> {
 #[tauri::command]
 fn delete_files(file_ids: Vec<i64>, state: State<'_, AppState>) -> Result<DeleteFilesResult, String> {
     require_writable(state.inner())?;
-    let deleted_infos =
-        db::delete_files_by_id(&state.paths.db_file, &file_ids).map_err(|e| e.to_string())?;
 
+    // Phase 1: collect file info from DB (read-only, no mutation)
+    let file_infos =
+        db::collect_files_for_delete(&state.paths.db_file, &file_ids).map_err(|e| e.to_string())?;
+
+    // Phase 2: delete from filesystem first
+    let mut fs_deleted_ids = Vec::new();
     let mut deleted_count = 0u64;
     let mut errors = Vec::new();
 
-    for info in &deleted_infos {
-        match std::fs::remove_file(&info.abs_path) {
-            Ok(()) => deleted_count += 1,
+    for (fid, abs_path, thumb_path) in &file_infos {
+        match std::fs::remove_file(abs_path) {
+            Ok(()) => {
+                fs_deleted_ids.push(*fid);
+                deleted_count += 1;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // File already gone from disk — safe to remove DB record too
+                fs_deleted_ids.push(*fid);
+                deleted_count += 1;
+            }
             Err(e) => {
-                deleted_count += 1; // DB record is already gone
-                errors.push(format!("{}: {e}", info.abs_path));
+                // Filesystem delete failed — do NOT remove from DB, keep state consistent
+                errors.push(format!("{abs_path}: {e}"));
             }
         }
-        if let Some(tp) = &info.thumb_path {
+        if let Some(tp) = thumb_path {
             let _ = std::fs::remove_file(tp);
         }
+    }
+
+    // Phase 3: only remove DB records for files successfully deleted from disk
+    if let Err(e) = db::delete_file_records(&state.paths.db_file, &fs_deleted_ids) {
+        errors.push(format!("DB cleanup error: {e}"));
     }
 
     Ok(DeleteFilesResult {
@@ -309,12 +314,23 @@ fn rename_file(
         new_name.clone()
     };
 
-    // Rename on disk first
+    // Phase 1: rename on disk first
     std::fs::rename(&old_abs, &new_abs_path).map_err(|e| format!("Rename failed: {e}"))?;
 
-    // Update DB
-    db::rename_file_record(&state.paths.db_file, file_id, &new_rel, &new_abs_str, &new_name)
-        .map_err(|e| e.to_string())?;
+    // Phase 2: update DB — rollback filesystem rename on failure
+    if let Err(e) = db::rename_file_record(&state.paths.db_file, file_id, &new_rel, &new_abs_str, &new_name) {
+        // Attempt to restore the original filename on disk
+        if let Err(rollback_err) = std::fs::rename(&new_abs_path, &old_abs) {
+            log::error!(
+                "DB update failed AND filesystem rollback failed: db_err={e}, rollback_err={rollback_err}, \
+                 file is now at {new_abs_str} but DB still says {old_abs}"
+            );
+            return Err(format!(
+                "Rename partially failed: DB error ({e}) and could not restore original filename ({rollback_err})"
+            ));
+        }
+        return Err(format!("Rename failed (DB update error, filesystem restored): {e}"));
+    }
 
     Ok(RenameFileResult {
         file_id,
@@ -336,12 +352,10 @@ fn save_user_config(config: serde_json::Value, state: State<'_, AppState>) -> Re
 }
 
 fn compute_setup_status(app_state: &AppState) -> SetupStatus {
-    let required_models = REQUIRED_OLLAMA_MODELS
-        .iter()
-        .map(|m| m.to_string())
-        .collect::<Vec<_>>();
+    let (model_tag, model_tier, model_reason) = llm::recommended_model(&app_state.gpu_info);
+    let required_models = vec![model_tag.to_string()];
 
-    let installed = runtime::list_installed_ollama_models();
+    let installed = llm::list_installed_models();
     let ollama_available = installed.is_some();
     let missing_models = if let Some(models) = installed {
         required_models
@@ -394,82 +408,10 @@ fn compute_setup_status(app_state: &AppState) -> SetupStatus {
         python_available: python_status.available,
         python_version: python_status.version,
         surya_venv_ok: python_status.venv_exists && python_status.available,
+        recommended_model: model_tag.to_string(),
+        model_tier: model_tier.as_str().to_string(),
+        model_selection_reason: model_reason,
     }
-}
-
-async fn run_model_download(setup_state: Arc<Mutex<SetupDownloadState>>, model: String) {
-    let child = Command::new("ollama")
-        .args(["pull", &model])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-
-    let Ok(mut child) = child else {
-        let mut state = setup_state.lock().expect("setup download mutex poisoned");
-        state.status = "failed".to_string();
-        state.message = "Could not spawn `ollama pull` process.".to_string();
-        return;
-    };
-
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-
-    if let Some(out) = stdout {
-        let reader = BufReader::new(out);
-        for line in reader.lines().map_while(Result::ok) {
-            update_download_state_from_line(&setup_state, &model, &line);
-        }
-    }
-    if let Some(err) = stderr {
-        let reader = BufReader::new(err);
-        for line in reader.lines().map_while(Result::ok) {
-            update_download_state_from_line(&setup_state, &model, &line);
-        }
-    }
-
-    match child.wait() {
-        Ok(status) if status.success() => {
-            let mut state = setup_state.lock().expect("setup download mutex poisoned");
-            state.status = "completed".to_string();
-            state.progress_pct = 100.0;
-            state.message = format!("Model {model} downloaded.");
-        }
-        Ok(status) => {
-            let mut state = setup_state.lock().expect("setup download mutex poisoned");
-            state.status = "failed".to_string();
-            state.message = format!("Model download failed with code {:?}", status.code());
-        }
-        Err(err) => {
-            let mut state = setup_state.lock().expect("setup download mutex poisoned");
-            state.status = "failed".to_string();
-            state.message = format!("Failed to wait for pull process: {err}");
-        }
-    }
-}
-
-fn update_download_state_from_line(
-    setup_state: &Arc<Mutex<SetupDownloadState>>,
-    model: &str,
-    line: &str,
-) {
-    let mut state = setup_state.lock().expect("setup download mutex poisoned");
-    state.model = Some(model.to_string());
-    state.status = "running".to_string();
-    if let Some(progress) = parse_progress_percent(line) {
-        state.progress_pct = progress;
-    }
-    state.message = line.trim().to_string();
-}
-
-fn parse_progress_percent(line: &str) -> Option<f32> {
-    let percent_pos = line.find('%')?;
-    let prefix = &line[..percent_pos];
-    let start = prefix
-        .rfind(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .map(|idx| idx + 1)
-        .unwrap_or(0);
-    let number = prefix.get(start..)?.trim();
-    number.parse::<f32>().ok().map(|v| v.clamp(0.0, 100.0))
 }
 
 fn resolve_surya_script(app_handle: &tauri::AppHandle) -> std::path::PathBuf {
@@ -486,15 +428,16 @@ fn resolve_surya_script(app_handle: &tauri::AppHandle) -> std::path::PathBuf {
         .join("surya_ocr.py")
 }
 
-fn build_scan_context(paths: &AppPaths, app_handle: &tauri::AppHandle) -> models::ScanContext {
+fn build_scan_context(app_state: &AppState, app_handle: &tauri::AppHandle) -> models::ScanContext {
     let surya_script = resolve_surya_script(app_handle);
+    let (model_tag, _, _) = llm::recommended_model(&app_state.gpu_info);
     models::ScanContext {
-        db_path: paths.db_file.clone(),
-        thumbnails_dir: paths.thumbnails_dir.clone(),
-        tmp_dir: paths.tmp_dir.clone(),
-        surya_venv_dir: paths.surya_venv_dir.clone(),
+        db_path: app_state.paths.db_file.clone(),
+        thumbnails_dir: app_state.paths.thumbnails_dir.clone(),
+        tmp_dir: app_state.paths.tmp_dir.clone(),
+        surya_venv_dir: app_state.paths.surya_venv_dir.clone(),
         surya_script,
-        model: REQUIRED_OLLAMA_MODELS[0].to_string(),
+        model: model_tag.to_string(),
     }
 }
 
@@ -519,7 +462,7 @@ fn spawn_scan_worker_if_needed(app_state: AppState, app_handle: &tauri::AppHandl
         flags.insert(job_id, cancel_flag.clone());
     }
 
-    let scan_ctx = build_scan_context(&app_state.paths, app_handle);
+    let scan_ctx = build_scan_context(&app_state, app_handle);
     let jobs = app_state.running_scan_jobs.clone();
     let cancel_flags = app_state.cancel_flags.clone();
     let app_state_for_task = app_state.clone();
@@ -534,7 +477,7 @@ fn spawn_scan_worker_if_needed(app_state: AppState, app_handle: &tauri::AppHandl
 
         match &result {
             Ok(_) => {
-                if let Err(e) = cleanup_ollama_models_impl() {
+                if let Err(e) = llm::cleanup_loaded_models() {
                     log::warn!("Auto-cleanup after scan failed: {e}");
                 }
                 // WAL checkpoint + backup after successful scan
@@ -561,34 +504,6 @@ fn spawn_scan_worker_if_needed(app_state: AppState, app_handle: &tauri::AppHandl
         let mut flags = cancel_flags.lock().expect("cancel flags mutex poisoned");
         flags.remove(&job_id);
     });
-}
-
-fn cleanup_ollama_models_impl() -> AppResult<CleanupResult> {
-    let output = Command::new("ollama").arg("ps").output()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut models = Vec::new();
-    for line in text.lines().skip(1) {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Some(model) = line.split_whitespace().next() {
-            models.push(model.to_string());
-        }
-    }
-
-    let mut stopped = 0_u64;
-    for model in &models {
-        let status = Command::new("ollama").args(["stop", model]).status()?;
-        if status.success() {
-            stopped += 1;
-        }
-    }
-
-    Ok(CleanupResult {
-        running_models: models.len() as u64,
-        stopped_models: stopped,
-    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -639,11 +554,14 @@ pub fn run() {
         })
         .expect("failed to initialize application paths/database");
 
+    let gpu_info = platform::gpu::detect_gpu_memory();
+
     let app_state = AppState {
         paths,
         read_only,
+        gpu_info,
         running_scan_jobs: Arc::new(Mutex::new(HashSet::new())),
-        setup_download: Arc::new(Mutex::new(SetupDownloadState::idle())),
+        setup_download: Arc::new(Mutex::new(llm::DownloadState::idle())),
         cancel_flags: Arc::new(Mutex::new(HashMap::new())),
     };
 
@@ -657,7 +575,7 @@ pub fn run() {
         .manage(app_state.clone())
         .on_window_event(|_window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
-                let _ = cleanup_ollama_models_impl();
+                let _ = llm::cleanup_loaded_models();
             }
         })
         .setup(move |app| {
@@ -700,27 +618,4 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cleanup_handles_empty_ps_output() {
-        let mock = "NAME\tID\tSIZE\tPROCESSOR\tUNTIL\n";
-        let models: Vec<String> = mock
-            .lines()
-            .skip(1)
-            .filter_map(|line| line.split_whitespace().next().map(ToString::to_string))
-            .collect();
-        assert!(models.is_empty());
-    }
-
-    #[test]
-    fn extracts_progress_percent() {
-        assert_eq!(parse_progress_percent("pulling ... 34%"), Some(34.0));
-        assert_eq!(parse_progress_percent("12.5% complete"), Some(12.5));
-        assert_eq!(parse_progress_percent("done"), None);
-    }
 }

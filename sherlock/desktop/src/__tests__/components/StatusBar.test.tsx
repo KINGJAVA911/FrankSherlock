@@ -1,13 +1,14 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import StatusBar from "../../components/StatusBar/StatusBar";
 
 describe("StatusBar", () => {
   it("shows VRAM info when available", () => {
     render(
       <StatusBar
-        runtime={{ vramUsedMib: 2048, vramTotalMib: 8192, ollamaAvailable: true, loadedModels: [], currentModel: "qwen" }}
-        dbStats={{ files: 100, roots: 2 }}
+        runtime={{ vramUsedMib: 2048, vramTotalMib: 8192, ollamaAvailable: true, loadedModels: [], currentModel: "qwen", gpuVendor: "nvidia", unifiedMemory: false, systemRamMib: 32768 }}
+        dbStats={{ files: 100, roots: 2, dbSizeBytes: 0, thumbsSizeBytes: 0 }}
         isScanning={false}
         runningScansCount={0}
         selectedCount={0}
@@ -19,7 +20,7 @@ describe("StatusBar", () => {
   it("shows n/a when VRAM is not available", () => {
     render(
       <StatusBar
-        runtime={{ vramUsedMib: null, vramTotalMib: null, ollamaAvailable: false, loadedModels: [] }}
+        runtime={{ vramUsedMib: null, vramTotalMib: null, ollamaAvailable: false, loadedModels: [], gpuVendor: "unknown", unifiedMemory: false, systemRamMib: 16384 }}
         dbStats={null}
         isScanning={false}
         runningScansCount={0}
@@ -58,7 +59,7 @@ describe("StatusBar", () => {
   it("shows model name", () => {
     render(
       <StatusBar
-        runtime={{ currentModel: "llama3", ollamaAvailable: true, loadedModels: ["llama3"] }}
+        runtime={{ currentModel: "llama3", ollamaAvailable: true, loadedModels: ["llama3"], gpuVendor: "nvidia", unifiedMemory: false, systemRamMib: 32768 }}
         dbStats={null}
         isScanning={false}
         runningScansCount={0}
@@ -66,5 +67,22 @@ describe("StatusBar", () => {
       />
     );
     expect(screen.getByText(/llama3/)).toBeInTheDocument();
+  });
+
+  it("calls onShowModelInfo when VRAM span is clicked", async () => {
+    const user = userEvent.setup();
+    const onShowModelInfo = vi.fn();
+    render(
+      <StatusBar
+        runtime={{ vramUsedMib: 1024, vramTotalMib: 8192, ollamaAvailable: true, loadedModels: [], gpuVendor: "nvidia", unifiedMemory: false, systemRamMib: 32768 }}
+        dbStats={null}
+        isScanning={false}
+        runningScansCount={0}
+        selectedCount={0}
+        onShowModelInfo={onShowModelInfo}
+      />
+    );
+    await user.click(screen.getByTitle("Click for model & hardware details"));
+    expect(onShowModelInfo).toHaveBeenCalledOnce();
   });
 });

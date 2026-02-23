@@ -11,6 +11,8 @@ pub struct HealthStatus {
 pub struct DbStats {
     pub roots: u64,
     pub files: u64,
+    pub db_size_bytes: u64,
+    pub thumbs_size_bytes: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -173,6 +175,9 @@ pub struct RuntimeStatus {
     pub loaded_models: Vec<String>,
     pub vram_used_mib: Option<u64>,
     pub vram_total_mib: Option<u64>,
+    pub gpu_vendor: crate::platform::gpu::GpuVendor,
+    pub unified_memory: bool,
+    pub system_ram_mib: u64,
     pub ollama_available: bool,
 }
 
@@ -197,6 +202,9 @@ pub struct SetupStatus {
     pub python_available: bool,
     pub python_version: Option<String>,
     pub surya_venv_ok: bool,
+    pub recommended_model: String,
+    pub model_tier: String,
+    pub model_selection_reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -272,13 +280,6 @@ pub enum HealthCheckOutcome {
     Healthy,
     RestoredFromBackup,
     Recreated,
-}
-
-/// Internal struct for filesystem cleanup after DB deletion — not serialized to frontend.
-#[derive(Debug, Clone)]
-pub struct DeletedFileInfo {
-    pub abs_path: String,
-    pub thumb_path: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

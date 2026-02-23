@@ -70,6 +70,8 @@ export type ScanJobStatus = {
 export type DbStats = {
   roots: number;
   files: number;
+  dbSizeBytes: number;
+  thumbsSizeBytes: number;
 };
 
 export type CleanupResult = {
@@ -82,6 +84,9 @@ export type RuntimeStatus = {
   loadedModels: string[];
   vramUsedMib?: number | null;
   vramTotalMib?: number | null;
+  gpuVendor: string;
+  unifiedMemory: boolean;
+  systemRamMib: number;
   ollamaAvailable: boolean;
 };
 
@@ -102,6 +107,9 @@ export type SetupStatus = {
   pythonAvailable: boolean;
   pythonVersion: string | null;
   suryaVenvOk: boolean;
+  recommendedModel: string;
+  modelTier: string;
+  modelSelectionReason: string;
 };
 
 export type HealthStatus = {

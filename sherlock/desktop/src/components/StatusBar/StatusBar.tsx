@@ -7,12 +7,20 @@ type Props = {
   isScanning: boolean;
   runningScansCount: number;
   selectedCount: number;
+  onShowModelInfo?: () => void;
 };
 
-export default function StatusBar({ runtime, dbStats, isScanning, runningScansCount, selectedCount }: Props) {
+export default function StatusBar({ runtime, dbStats, isScanning, runningScansCount, selectedCount, onShowModelInfo }: Props) {
   return (
     <div className="statusbar">
-      <span>
+      <span
+        className={onShowModelInfo ? "statusbar-clickable" : undefined}
+        onClick={onShowModelInfo}
+        title="Click for model & hardware details"
+        role={onShowModelInfo ? "button" : undefined}
+        tabIndex={onShowModelInfo ? 0 : undefined}
+        onKeyDown={onShowModelInfo ? (e) => { if (e.key === "Enter" || e.key === " ") onShowModelInfo(); } : undefined}
+      >
         VRAM:{" "}
         {runtime?.vramUsedMib != null && runtime?.vramTotalMib != null
           ? `${runtime.vramUsedMib}/${runtime.vramTotalMib} MiB`
