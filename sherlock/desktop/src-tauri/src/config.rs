@@ -149,15 +149,11 @@ pub fn expand_and_canonicalize(raw: &str) -> AppResult<PathBuf> {
         PathBuf::from(trimmed)
     };
 
-    let canonical = expanded.canonicalize().map_err(|e| {
-        AppError::InvalidPath(format!("cannot resolve path '{}': {}", raw, e))
-    })?;
+    let canonical = dunce::canonicalize(&expanded)
+        .map_err(|e| AppError::InvalidPath(format!("cannot resolve path '{}': {}", raw, e)))?;
 
     if !canonical.is_dir() {
-        return Err(AppError::InvalidPath(format!(
-            "not a directory: {}",
-            raw
-        )));
+        return Err(AppError::InvalidPath(format!("not a directory: {}", raw)));
     }
 
     Ok(canonical)
@@ -175,7 +171,7 @@ pub fn canonical_root_path(path: &str) -> AppResult<PathBuf> {
             "path is not a directory: {path}"
         )));
     }
-    Ok(root.canonicalize()?)
+    Ok(dunce::canonicalize(root)?)
 }
 
 #[cfg(test)]

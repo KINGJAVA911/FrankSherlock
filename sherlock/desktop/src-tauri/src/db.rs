@@ -1425,11 +1425,7 @@ pub fn add_files_to_album(db_path: &Path, album_id: i64, file_ids: &[i64]) -> Ap
     Ok(count)
 }
 
-pub fn remove_files_from_album(
-    db_path: &Path,
-    album_id: i64,
-    file_ids: &[i64],
-) -> AppResult<u64> {
+pub fn remove_files_from_album(db_path: &Path, album_id: i64, file_ids: &[i64]) -> AppResult<u64> {
     let conn = open_conn(db_path)?;
     let mut count = 0u64;
     for fid in file_ids {
@@ -2545,10 +2541,10 @@ mod tests {
         let (_dir, db_path) = test_db_path();
         init_database(&db_path).expect("init");
         let root_id = upsert_root(&db_path, "/tmp/demo").expect("root");
-        let f1 = upsert_file_record(&db_path, &sample_record(root_id, "a.jpg", "fp-a"))
-            .expect("upsert");
-        let f2 = upsert_file_record(&db_path, &sample_record(root_id, "b.jpg", "fp-b"))
-            .expect("upsert");
+        let f1 =
+            upsert_file_record(&db_path, &sample_record(root_id, "a.jpg", "fp-a")).expect("upsert");
+        let f2 =
+            upsert_file_record(&db_path, &sample_record(root_id, "b.jpg", "fp-b")).expect("upsert");
 
         let album = create_album(&db_path, "Best").expect("create");
         let added = add_files_to_album(&db_path, album.id, &[f1, f2]).expect("add");
@@ -2576,8 +2572,11 @@ mod tests {
         let root_id = upsert_root(&db_path, "/tmp/demo").expect("root");
         let f1 = upsert_file_record(&db_path, &sample_record(root_id, "in_album.jpg", "fp-1"))
             .expect("upsert");
-        let _f2 = upsert_file_record(&db_path, &sample_record(root_id, "not_in_album.jpg", "fp-2"))
-            .expect("upsert");
+        let _f2 = upsert_file_record(
+            &db_path,
+            &sample_record(root_id, "not_in_album.jpg", "fp-2"),
+        )
+        .expect("upsert");
 
         let album = create_album(&db_path, "MyAlbum").expect("create");
         add_files_to_album(&db_path, album.id, &[f1]).expect("add");

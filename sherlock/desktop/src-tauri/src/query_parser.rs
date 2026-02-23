@@ -12,7 +12,10 @@ pub fn parse_query(raw_query: &str) -> ParsedQuery {
     let mut album_name: Option<String> = None;
     let album_re = Regex::new(r#"(?i)\balbum:(?:"([^"]+)"|(\S+))"#).expect("valid regex");
     let working_query = if let Some(cap) = album_re.captures(raw) {
-        album_name = cap.get(1).or_else(|| cap.get(2)).map(|m| m.as_str().to_string());
+        album_name = cap
+            .get(1)
+            .or_else(|| cap.get(2))
+            .map(|m| m.as_str().to_string());
         album_re.replace(raw, "").trim().to_string()
     } else {
         raw.to_string()

@@ -176,8 +176,7 @@ fn start_venv_provision(state: State<'_, AppState>) -> Result<VenvProvisionStatu
         .ok_or_else(|| "No Python 3 found on this system. Install Python 3 first.".to_string())?;
 
     // Check if venv already works
-    let python_status =
-        platform::python::check_python_available(&state.paths.surya_venv_dir);
+    let python_status = platform::python::check_python_available(&state.paths.surya_venv_dir);
     if python_status.available {
         let venv_python = platform::python::python_venv_binary(&state.paths.surya_venv_dir);
         let surya_ok = std::process::Command::new(&venv_python)
@@ -583,10 +582,8 @@ fn compute_setup_status(app_state: &AppState) -> SetupStatus {
 
     if !surya_venv_ok {
         if system_python_found {
-            instructions.push(
-                "OCR (optional): Click 'Setup OCR' to auto-configure Surya OCR."
-                    .to_string(),
-            );
+            instructions
+                .push("OCR (optional): Click 'Setup OCR' to auto-configure Surya OCR.".to_string());
         } else if !python_status.venv_exists || !python_status.available {
             match os {
                 platform::OsKind::Linux => {
@@ -816,15 +813,16 @@ pub fn run() {
     let gpu_info = platform::gpu::detect_gpu_memory();
     let cached_system_python = platform::python::find_system_python();
 
-    let cli_folder_path: Option<String> = std::env::args().nth(1).and_then(|raw| {
-        match config::expand_and_canonicalize(&raw) {
-            Ok(p) => Some(p.display().to_string()),
-            Err(e) => {
-                eprintln!("Invalid folder argument '{}': {}", raw, e);
-                None
-            }
-        }
-    });
+    let cli_folder_path: Option<String> =
+        std::env::args()
+            .nth(1)
+            .and_then(|raw| match config::expand_and_canonicalize(&raw) {
+                Ok(p) => Some(p.display().to_string()),
+                Err(e) => {
+                    eprintln!("Invalid folder argument '{}': {}", raw, e);
+                    None
+                }
+            });
 
     let app_state = AppState {
         paths,

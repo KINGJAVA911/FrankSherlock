@@ -121,11 +121,7 @@ pub fn platform_python_fallback_paths() -> Vec<PathBuf> {
             if let Ok(entries) = std::fs::read_dir(&local_path) {
                 let mut python_dirs: Vec<PathBuf> = entries
                     .filter_map(|e| e.ok())
-                    .filter(|e| {
-                        e.file_name()
-                            .to_string_lossy()
-                            .starts_with("Python3")
-                    })
+                    .filter(|e| e.file_name().to_string_lossy().starts_with("Python3"))
                     .map(|e| e.path().join("python.exe"))
                     .collect();
                 python_dirs.sort();
@@ -151,13 +147,9 @@ pub fn find_system_python() -> Option<PathBuf> {
     }
 
     // Fallback: probe well-known locations
-    for path in platform_python_fallback_paths() {
-        if path.exists() && validate_python3(&path) {
-            return Some(path);
-        }
-    }
-
-    None
+    platform_python_fallback_paths()
+        .into_iter()
+        .find(|path| path.exists() && validate_python3(path))
 }
 
 // ── Venv provisioning state ──────────────────────────────────────────

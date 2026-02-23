@@ -6,9 +6,8 @@ use crate::error::{AppError, AppResult};
 
 /// Load PDFium from the bundled library path.
 fn load_pdfium(lib_dir: &Path) -> AppResult<Pdfium> {
-    let bindings =
-        Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(lib_dir))
-            .map_err(|e| AppError::Config(format!("Failed to load PDFium library: {e}")))?;
+    let bindings = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(lib_dir))
+        .map_err(|e| AppError::Config(format!("Failed to load PDFium library: {e}")))?;
     Ok(Pdfium::new(bindings))
 }
 

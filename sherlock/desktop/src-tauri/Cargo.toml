@@ -20,6 +20,7 @@ tauri-build = { version = "2.5.5", features = [] }
 [dependencies]
 chrono = { version = "0.4", features = ["clock"] }
 dirs = "6"
+dunce = "1"
 hex = "0.4"
 log = "0.4"
 regex = "1"
