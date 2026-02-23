@@ -16,6 +16,8 @@ describe("useSearch", () => {
     query: "",
     selectedMediaType: "",
     selectedRootId: null,
+    sortBy: "dateModified" as const,
+    sortOrder: "desc" as const,
     isReady: true,
     onClearSelection: vi.fn(),
   };
@@ -51,5 +53,16 @@ describe("useSearch", () => {
     vi.advanceTimersByTime(500);
     expect(searchImages).not.toHaveBeenCalled();
     vi.useRealTimers();
+  });
+
+  it("passes sort params to searchImages", async () => {
+    renderHook(() => useSearch({ ...defaultParams, sortBy: "name", sortOrder: "asc" }));
+    await waitFor(() => expect(searchImages).toHaveBeenCalled());
+    expect(searchImages).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sortBy: "name",
+        sortOrder: "asc",
+      })
+    );
   });
 });

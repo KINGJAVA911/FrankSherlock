@@ -30,6 +30,9 @@ export type SearchResponse = {
   parsedQuery: ParsedQuery;
 };
 
+export type SortField = "relevance" | "dateModified" | "name" | "type";
+export type SortOrder = "asc" | "desc";
+
 export type SearchRequest = {
   query: string;
   limit?: number;
@@ -39,6 +42,8 @@ export type SearchRequest = {
   minConfidence?: number;
   dateFrom?: string;
   dateTo?: string;
+  sortBy?: SortField;
+  sortOrder?: SortOrder;
 };
 
 export type ScanJobStatus = {

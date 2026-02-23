@@ -23,6 +23,26 @@
   width: 140px;
 }
 
+.toolbar-sort-select {
+  width: 130px;
+}
+
+.toolbar-sort-dir {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-input);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
 /* ── Content body ─────────────────────────────────────────── */
 .content-body {
   flex: 1;

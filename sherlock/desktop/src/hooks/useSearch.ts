@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { searchImages } from "../api";
-import type { SearchItem, SearchResponse } from "../types";
+import type { SearchItem, SearchResponse, SortField, SortOrder } from "../types";
 
 const PAGE_SIZE = 80;
 
@@ -8,11 +8,13 @@ type UseSearchParams = {
   query: string;
   selectedMediaType: string;
   selectedRootId: number | null;
+  sortBy: SortField;
+  sortOrder: SortOrder;
   isReady: boolean;
   onClearSelection: () => void;
 };
 
-export function useSearch({ query, selectedMediaType, selectedRootId, isReady, onClearSelection }: UseSearchParams) {
+export function useSearch({ query, selectedMediaType, selectedRootId, sortBy, sortOrder, isReady, onClearSelection }: UseSearchParams) {
   const [items, setItems] = useState<SearchItem[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -42,6 +44,8 @@ export function useSearch({ query, selectedMediaType, selectedRootId, isReady, o
         offset,
         mediaTypes: selectedMediaType ? [selectedMediaType] : undefined,
         rootScope: selectedRootId ? [selectedRootId] : undefined,
+        sortBy,
+        sortOrder,
       });
       if (reqId !== requestIdRef.current) return;
       applySearchResponse(response, append);
@@ -53,7 +57,7 @@ export function useSearch({ query, selectedMediaType, selectedRootId, isReady, o
       setLoading(false);
       setLoadingMore(false);
     }
-  }, [query, selectedMediaType, selectedRootId, onClearSelection]);
+  }, [query, selectedMediaType, selectedRootId, sortBy, sortOrder, onClearSelection]);
 
   const onLoadMore = useCallback(async () => {
     if (!canLoadMore || loadingMore) return;
@@ -67,7 +71,7 @@ export function useSearch({ query, selectedMediaType, selectedRootId, isReady, o
       void runSearch(0, false);
     }, 260);
     return () => clearTimeout(timer);
-  }, [query, selectedMediaType, selectedRootId, isReady]);
+  }, [query, selectedMediaType, selectedRootId, sortBy, sortOrder, isReady]);
 
   return { items, total, loading, loadingMore, canLoadMore, runSearch, onLoadMore };
 }

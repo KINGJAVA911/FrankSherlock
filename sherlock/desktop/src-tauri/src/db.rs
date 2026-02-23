@@ -7,7 +7,8 @@ use rusqlite::{params, params_from_iter, types::Value, Connection, OpenFlags, Ro
 use crate::error::{AppError, AppResult};
 use crate::models::{
     DbStats, ExistingFile, FileRecordUpsert, HealthCheckOutcome, ParsedQuery, PurgeResult,
-    RootInfo, ScanJobState, ScanJobStatus, SearchItem, SearchRequest, SearchResponse,
+    RootInfo, ScanJobState, ScanJobStatus, SearchItem, SearchRequest, SearchResponse, SortField,
+    SortOrder,
 };
 use crate::query_parser::parse_query;
 
@@ -95,6 +96,8 @@ pub fn init_database(db_path: &Path) -> AppResult<()> {
         CREATE INDEX IF NOT EXISTS idx_files_updated_at ON files(updated_at);
         CREATE INDEX IF NOT EXISTS idx_files_fingerprint ON files(fingerprint);
         CREATE INDEX IF NOT EXISTS idx_files_deleted_at ON files(deleted_at);
+        CREATE INDEX IF NOT EXISTS idx_files_mtime_ns ON files(mtime_ns);
+        CREATE INDEX IF NOT EXISTS idx_files_filename ON files(filename);
 
         CREATE VIRTUAL TABLE IF NOT EXISTS files_fts USING fts5(
             filename,
@@ -925,11 +928,7 @@ fn search_images_normalized(
     let mut count_stmt = conn.prepare(&count_sql)?;
     let total: i64 = count_stmt.query_row(params_from_iter(bind_values.clone()), |r| r.get(0))?;
 
-    let order_sql = if has_query {
-        " ORDER BY bm25(files_fts), f.confidence DESC, f.updated_at DESC "
-    } else {
-        " ORDER BY f.updated_at DESC "
-    };
+    let order_sql = build_order_clause(has_query, &request.sort_by, &request.sort_order);
     let select_sql = format!(
         "SELECT f.id, f.root_id, f.rel_path, f.abs_path, f.media_type, f.description, \
          f.confidence, f.mtime_ns, f.size_bytes, f.thumb_path{}{}{} LIMIT ? OFFSET ?",
@@ -975,6 +974,26 @@ fn search_images_normalized(
         items,
         parsed_query: parsed,
     })
+}
+
+fn build_order_clause(has_query: bool, sort_by: &SortField, sort_order: &SortOrder) -> String {
+    let dir = match sort_order {
+        SortOrder::Asc => "ASC",
+        SortOrder::Desc => "DESC",
+    };
+    let primary = match sort_by {
+        SortField::Relevance => {
+            if has_query {
+                return " ORDER BY bm25(files_fts), f.confidence DESC, f.updated_at DESC, f.id DESC ".to_string();
+            }
+            // No query text — fall back to date modified
+            format!("f.mtime_ns {dir}")
+        }
+        SortField::DateModified => format!("f.mtime_ns {dir}"),
+        SortField::Name => format!("f.filename {dir}"),
+        SortField::Type => format!("f.media_type {dir}"),
+    };
+    format!(" ORDER BY {primary}, f.updated_at DESC, f.id DESC ")
 }
 
 fn scan_job_from_row(row: &Row<'_>) -> rusqlite::Result<ScanJobStatus> {
@@ -1708,5 +1727,105 @@ mod tests {
         assert_eq!(stats.files, 3);
 
         restore_dir_writable(dir.path());
+    }
+
+    // -----------------------------------------------------------------------
+    // Sort order tests
+    // -----------------------------------------------------------------------
+
+    fn insert_sort_test_files(db_path: &std::path::Path, root_id: i64) {
+        let files = vec![
+            ("alpha.jpg", "photo", 3000_i64),
+            ("charlie.jpg", "anime", 1000),
+            ("bravo.jpg", "document", 2000),
+        ];
+        for (name, media, mtime) in files {
+            let rec = FileRecordUpsert {
+                root_id,
+                rel_path: name.to_string(),
+                abs_path: format!("/tmp/sort/{name}"),
+                filename: name.to_string(),
+                media_type: media.to_string(),
+                description: format!("desc {name}"),
+                extracted_text: String::new(),
+                canonical_mentions: String::new(),
+                confidence: 0.7,
+                lang_hint: "en".to_string(),
+                mtime_ns: mtime,
+                size_bytes: 100,
+                fingerprint: format!("fp-{name}"),
+                scan_marker: 1,
+            };
+            upsert_file_record(db_path, &rec).expect("upsert");
+        }
+    }
+
+    #[test]
+    fn sort_by_name_asc() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/sort").expect("root");
+        insert_sort_test_files(&db_path, root_id);
+
+        let req = SearchRequest {
+            sort_by: SortField::Name,
+            sort_order: SortOrder::Asc,
+            ..SearchRequest::default()
+        };
+        let res = search_images(&db_path, &req).expect("search");
+        let names: Vec<&str> = res.items.iter().map(|i| i.rel_path.as_str()).collect();
+        assert_eq!(names, vec!["alpha.jpg", "bravo.jpg", "charlie.jpg"]);
+    }
+
+    #[test]
+    fn sort_by_date_desc() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/sort").expect("root");
+        insert_sort_test_files(&db_path, root_id);
+
+        let req = SearchRequest {
+            sort_by: SortField::DateModified,
+            sort_order: SortOrder::Desc,
+            ..SearchRequest::default()
+        };
+        let res = search_images(&db_path, &req).expect("search");
+        let names: Vec<&str> = res.items.iter().map(|i| i.rel_path.as_str()).collect();
+        assert_eq!(names, vec!["alpha.jpg", "bravo.jpg", "charlie.jpg"]);
+    }
+
+    #[test]
+    fn sort_by_type_asc() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/sort").expect("root");
+        insert_sort_test_files(&db_path, root_id);
+
+        let req = SearchRequest {
+            sort_by: SortField::Type,
+            sort_order: SortOrder::Asc,
+            ..SearchRequest::default()
+        };
+        let res = search_images(&db_path, &req).expect("search");
+        let types: Vec<&str> = res.items.iter().map(|i| i.media_type.as_str()).collect();
+        assert_eq!(types, vec!["anime", "document", "photo"]);
+    }
+
+    #[test]
+    fn sort_relevance_with_query() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/sort").expect("root");
+        insert_sort_test_files(&db_path, root_id);
+
+        let req = SearchRequest {
+            query: "alpha".to_string(),
+            sort_by: SortField::Relevance,
+            sort_order: SortOrder::Desc,
+            ..SearchRequest::default()
+        };
+        let res = search_images(&db_path, &req).expect("search");
+        assert!(res.total >= 1);
+        assert_eq!(res.items[0].rel_path, "alpha.jpg");
     }
 }

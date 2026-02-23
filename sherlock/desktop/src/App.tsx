@@ -6,7 +6,9 @@ import type {
   RootInfo,
   RuntimeStatus,
   SearchItem,
-  SetupStatus
+  SetupStatus,
+  SortField,
+  SortOrder,
 } from "./types";
 import { errorMessage } from "./utils";
 import Titlebar from "./components/Titlebar/Titlebar";
@@ -38,6 +40,8 @@ export default function App() {
   /* ── Shared state ── */
   const [query, setQuery] = useState("");
   const [selectedMediaType, setSelectedMediaType] = useState("");
+  const [sortBy, setSortBy] = useState<SortField>("dateModified");
+  const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
   const [setup, setSetup] = useState<SetupStatus | null>(null);
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   const [dbStats, setDbStats] = useState<DbStats | null>(null);
@@ -69,6 +73,8 @@ export default function App() {
     query,
     selectedMediaType,
     selectedRootId,
+    sortBy,
+    sortOrder,
     isReady: !setup || setup.isReady,
     onClearSelection: clearSelection,
   });
@@ -241,6 +247,11 @@ export default function App() {
           selectedMediaType={selectedMediaType}
           onMediaTypeChange={setSelectedMediaType}
           mediaTypeOptions={mediaTypeOptions}
+          sortBy={sortBy}
+          onSortByChange={setSortBy}
+          sortOrder={sortOrder}
+          onSortOrderChange={setSortOrder}
+          hasTextQuery={query.trim().length > 0}
           items={items}
           total={total}
           loading={loading}

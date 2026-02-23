@@ -20,6 +20,24 @@ pub struct CleanupResult {
     pub stopped_models: u64,
 }
 
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum SortField {
+    Relevance,
+    #[default]
+    DateModified,
+    Name,
+    Type,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum SortOrder {
+    Asc,
+    #[default]
+    Desc,
+}
+
 #[derive(Debug, Clone, serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchRequest {
@@ -39,6 +57,10 @@ pub struct SearchRequest {
     pub date_from: Option<String>,
     #[serde(default)]
     pub date_to: Option<String>,
+    #[serde(default)]
+    pub sort_by: SortField,
+    #[serde(default)]
+    pub sort_order: SortOrder,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

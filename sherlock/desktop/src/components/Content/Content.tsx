@@ -1,5 +1,5 @@
 import type { RefObject } from "react";
-import type { SearchItem } from "../../types";
+import type { SearchItem, SortField, SortOrder } from "../../types";
 import Toolbar from "./Toolbar";
 import ResultsMeta from "./ResultsMeta";
 import ImageGrid from "./ImageGrid";
@@ -11,6 +11,11 @@ type ContentProps = {
   selectedMediaType: string;
   onMediaTypeChange: (t: string) => void;
   mediaTypeOptions: string[];
+  sortBy: SortField;
+  onSortByChange: (v: SortField) => void;
+  sortOrder: SortOrder;
+  onSortOrderChange: (v: SortOrder) => void;
+  hasTextQuery: boolean;
   items: SearchItem[];
   total: number;
   loading: boolean;
@@ -28,6 +33,7 @@ type ContentProps = {
 
 export default function Content({
   query, onQueryChange, selectedMediaType, onMediaTypeChange, mediaTypeOptions,
+  sortBy, onSortByChange, sortOrder, onSortOrderChange, hasTextQuery,
   items, total, loading, loadingMore, canLoadMore, isScanning, selectedRootName,
   selectedIndices, focusIndex, gridRef, sentinelRef, onTileClick, onTileDoubleClick,
 }: ContentProps) {
@@ -39,6 +45,11 @@ export default function Content({
         selectedMediaType={selectedMediaType}
         onMediaTypeChange={onMediaTypeChange}
         mediaTypeOptions={mediaTypeOptions}
+        sortBy={sortBy}
+        onSortByChange={onSortByChange}
+        sortOrder={sortOrder}
+        onSortOrderChange={onSortOrderChange}
+        hasTextQuery={hasTextQuery}
       />
 
       <div className="content-body">
