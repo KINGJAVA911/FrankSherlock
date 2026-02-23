@@ -1,9 +1,12 @@
 pub mod clipboard;
 pub mod gpu;
+pub mod paths;
 pub mod process;
 pub mod python;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+// Variants are constructed via cfg-conditional blocks in current_os(); clippy sees only one on each target.
 #[allow(dead_code)]
 pub enum OsKind {
     Linux,
@@ -11,7 +14,6 @@ pub enum OsKind {
     Windows,
 }
 
-#[allow(dead_code)]
 pub fn current_os() -> OsKind {
     #[cfg(target_os = "linux")]
     {

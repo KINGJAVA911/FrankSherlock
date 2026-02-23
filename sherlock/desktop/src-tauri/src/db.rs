@@ -7,9 +7,9 @@ use rusqlite_migration::{HookError, Migrations, M};
 
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    DbStats, ExistingFile, FileRecordUpsert, HealthCheckOutcome, ParsedQuery, PurgeResult,
-    RootInfo, ScanJobState, ScanJobStatus, SearchItem, SearchRequest, SearchResponse, SortField,
-    SortOrder,
+    DbStats, ExistingFile, FileMetadata, FileRecordUpsert, HealthCheckOutcome, ParsedQuery,
+    PurgeResult, RootInfo, ScanJobState, ScanJobStatus, SearchItem, SearchRequest, SearchResponse,
+    SortField, SortOrder,
 };
 use crate::query_parser::parse_query;
 
@@ -152,6 +152,12 @@ fn run_migrations(conn: &mut Connection) -> AppResult<()> {
         // 3. Example:
         //    M::up("ALTER TABLE files ADD COLUMN tags TEXT NOT NULL DEFAULT '';"),
         // -------------------------------------------------------------------
+        // Migration 1: Add location_text column
+        M::up("ALTER TABLE files ADD COLUMN location_text TEXT NOT NULL DEFAULT '';"),
+        // Migration 2: Rebuild FTS5 with location_text column
+        M::up_with_hook("SELECT 1;", |conn| {
+            rebuild_fts_with_location(conn).map_err(|e| HookError::Hook(e.to_string()))
+        }),
     ]);
 
     migrations
@@ -522,12 +528,12 @@ pub fn upsert_file_record(db_path: &Path, record: &FileRecordUpsert) -> AppResul
             root_id, rel_path, filename, abs_path,
             media_type, description, extracted_text, canonical_mentions,
             confidence, lang_hint, mtime_ns, size_bytes, fingerprint,
-            scan_marker, updated_at, deleted_at
+            scan_marker, updated_at, deleted_at, location_text
         ) VALUES (
             ?1, ?2, ?3, ?4,
             ?5, ?6, ?7, ?8,
             ?9, ?10, ?11, ?12, ?13,
-            ?14, ?15, NULL
+            ?14, ?15, NULL, ?16
         )
         ON CONFLICT(root_id, rel_path) DO UPDATE SET
             filename = excluded.filename,
@@ -543,7 +549,8 @@ pub fn upsert_file_record(db_path: &Path, record: &FileRecordUpsert) -> AppResul
             fingerprint = excluded.fingerprint,
             scan_marker = excluded.scan_marker,
             updated_at = excluded.updated_at,
-            deleted_at = NULL
+            deleted_at = NULL,
+            location_text = excluded.location_text
         "#,
         params![
             record.root_id,
@@ -560,7 +567,8 @@ pub fn upsert_file_record(db_path: &Path, record: &FileRecordUpsert) -> AppResul
             record.size_bytes,
             record.fingerprint,
             record.scan_marker,
-            now
+            now,
+            record.location_text
         ],
     )?;
 
@@ -658,8 +666,10 @@ fn refresh_fts(conn: &Connection, file_id: i64) -> AppResult<()> {
     conn.execute("DELETE FROM files_fts WHERE rowid = ?1", params![file_id])?;
     conn.execute(
         r#"
-        INSERT INTO files_fts (rowid, filename, rel_path, description, extracted_text, canonical_mentions)
-        SELECT id, filename, rel_path, description, extracted_text, canonical_mentions
+        INSERT INTO files_fts (rowid, filename, rel_path, description, extracted_text,
+                               canonical_mentions, location_text)
+        SELECT id, filename, rel_path, description, extracted_text,
+               canonical_mentions, location_text
         FROM files
         WHERE id = ?1
         "#,
@@ -905,6 +915,62 @@ pub fn rename_file_record(
     tx.execute(
         "UPDATE files SET rel_path = ?2, abs_path = ?3, filename = ?4, updated_at = ?5 WHERE id = ?1",
         params![file_id, new_rel_path, new_abs_path, new_filename, now],
+    )?;
+    refresh_fts(&tx, file_id)?;
+    tx.commit()?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// File metadata get/update
+// ---------------------------------------------------------------------------
+
+pub fn get_file_metadata(db_path: &Path, file_id: i64) -> AppResult<FileMetadata> {
+    let conn = open_conn(db_path)?;
+    conn.query_row(
+        "SELECT id, media_type, description, extracted_text, canonical_mentions, location_text
+         FROM files WHERE id = ?1 AND deleted_at IS NULL",
+        params![file_id],
+        |row| {
+            Ok(FileMetadata {
+                id: row.get(0)?,
+                media_type: row.get(1)?,
+                description: row.get(2)?,
+                extracted_text: row.get(3)?,
+                canonical_mentions: row.get(4)?,
+                location_text: row.get(5)?,
+            })
+        },
+    )
+    .map_err(AppError::from)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn update_file_metadata(
+    db_path: &Path,
+    file_id: i64,
+    media_type: &str,
+    description: &str,
+    extracted_text: &str,
+    canonical_mentions: &str,
+    location_text: &str,
+) -> AppResult<()> {
+    let conn = open_conn(db_path)?;
+    let tx = conn.unchecked_transaction()?;
+    let now = now_epoch_secs();
+    tx.execute(
+        "UPDATE files SET media_type = ?2, description = ?3, extracted_text = ?4,
+                canonical_mentions = ?5, location_text = ?6, updated_at = ?7
+         WHERE id = ?1 AND deleted_at IS NULL",
+        params![
+            file_id,
+            media_type,
+            description,
+            extracted_text,
+            canonical_mentions,
+            location_text,
+            now
+        ],
     )?;
     refresh_fts(&tx, file_id)?;
     tx.commit()?;
@@ -1211,6 +1277,27 @@ fn ensure_fts_schema(conn: &Connection) -> AppResult<()> {
     Ok(())
 }
 
+fn rebuild_fts_with_location(conn: &Connection) -> AppResult<()> {
+    conn.execute_batch(
+        r#"
+        DROP TABLE IF EXISTS files_fts;
+        CREATE VIRTUAL TABLE files_fts USING fts5(
+            filename,
+            rel_path,
+            description,
+            extracted_text,
+            canonical_mentions,
+            location_text
+        );
+        INSERT INTO files_fts (rowid, filename, rel_path, description, extracted_text,
+                               canonical_mentions, location_text)
+        SELECT id, filename, rel_path, description, extracted_text,
+               canonical_mentions, location_text FROM files;
+        "#,
+    )?;
+    Ok(())
+}
+
 fn truncate_text(value: &str, max: usize) -> String {
     if value.chars().count() <= max {
         return value.to_string();
@@ -1254,7 +1341,7 @@ mod tests {
             root_id,
             rel_path: rel.to_string(),
             abs_path: format!("/tmp/demo/{rel}"),
-            filename: rel.rsplit('/').next().unwrap_or(rel).to_string(),
+            filename: crate::platform::paths::rel_path_filename(rel).to_string(),
             media_type: "photo".to_string(),
             description: format!("desc of {rel}"),
             extracted_text: String::new(),
@@ -1265,6 +1352,7 @@ mod tests {
             size_bytes: 10_000,
             fingerprint: fp.to_string(),
             scan_marker: 123,
+            location_text: String::new(),
         }
     }
 
@@ -1299,6 +1387,7 @@ mod tests {
                 size_bytes: 10_000,
                 fingerprint: format!("fp-{i}"),
                 scan_marker: 123,
+                location_text: String::new(),
             };
             upsert_file_record(&db_path, &rec).expect("upsert");
         }
@@ -1341,6 +1430,7 @@ mod tests {
             size_bytes: 10_000,
             fingerprint: "fp-1".to_string(),
             scan_marker: 123,
+            location_text: String::new(),
         };
         upsert_file_record(&db_path, &rec).expect("upsert");
 
@@ -1375,6 +1465,7 @@ mod tests {
             size_bytes: 10_000,
             fingerprint: "fp-2".to_string(),
             scan_marker: 123,
+            location_text: String::new(),
         };
         upsert_file_record(&db_path, &rec).expect("upsert");
 
@@ -1410,6 +1501,7 @@ mod tests {
             size_bytes: 200,
             fingerprint: "fp1".to_string(),
             scan_marker: 1,
+            location_text: String::new(),
         };
         upsert_file_record(&db_path, &rec).expect("upsert");
         touch_file_scan_marker(&db_path, root_id, "a.jpg", 2).expect("touch");
@@ -1447,6 +1539,7 @@ mod tests {
             size_bytes: 5000,
             fingerprint: "fp-x".to_string(),
             scan_marker: 10,
+            location_text: String::new(),
         };
         upsert_file_record(&db_path, &rec).expect("upsert");
         let files = load_existing_files(&db_path, root_id).expect("load");
@@ -1475,6 +1568,7 @@ mod tests {
             size_bytes: 100,
             fingerprint: "fp-del".to_string(),
             scan_marker: 5,
+            location_text: String::new(),
         };
         upsert_file_record(&db_path, &rec).expect("upsert");
         mark_missing_as_deleted(&db_path, root_id, 99).expect("delete");
@@ -1856,6 +1950,7 @@ mod tests {
                 size_bytes: 100,
                 fingerprint: format!("fp-{name}"),
                 scan_marker: 1,
+                location_text: String::new(),
             };
             upsert_file_record(db_path, &rec).expect("upsert");
         }
@@ -1922,11 +2017,11 @@ mod tests {
         init_database(&db_path).expect("init");
 
         let conn = open_conn(&db_path).expect("open");
-        // Verify user_version is set (migration 0 applied → version 1)
+        // Verify user_version is set (3 migrations applied → version 3)
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .expect("user_version");
-        assert_eq!(version, 1);
+        assert_eq!(version, 3);
 
         // Verify all tables exist
         let tables: Vec<String> = {
@@ -1964,8 +2059,8 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .expect("user_version");
-        // We have 1 migration (index 0), so user_version should be 1
-        assert_eq!(version, 1);
+        // We have 3 migrations (indices 0, 1, 2), so user_version should be 3
+        assert_eq!(version, 3);
     }
 
     #[test]
@@ -1996,12 +2091,12 @@ mod tests {
         init_database(&db_path).expect("init");
         let root_id = upsert_root(&db_path, "/tmp/demo").expect("root");
 
-        let id1 = upsert_file_record(&db_path, &sample_record(root_id, "a.jpg", "fp-a"))
-            .expect("upsert");
-        let id2 = upsert_file_record(&db_path, &sample_record(root_id, "b.jpg", "fp-b"))
-            .expect("upsert");
-        let _id3 = upsert_file_record(&db_path, &sample_record(root_id, "c.jpg", "fp-c"))
-            .expect("upsert");
+        let id1 =
+            upsert_file_record(&db_path, &sample_record(root_id, "a.jpg", "fp-a")).expect("upsert");
+        let id2 =
+            upsert_file_record(&db_path, &sample_record(root_id, "b.jpg", "fp-b")).expect("upsert");
+        let _id3 =
+            upsert_file_record(&db_path, &sample_record(root_id, "c.jpg", "fp-c")).expect("upsert");
 
         // Phase 1: collect — DB is not mutated
         let infos = collect_files_for_delete(&db_path, &[id1, id2]).expect("collect");
@@ -2045,10 +2140,10 @@ mod tests {
         init_database(&db_path).expect("init");
         let root_id = upsert_root(&db_path, "/tmp/demo").expect("root");
 
-        let id1 = upsert_file_record(&db_path, &sample_record(root_id, "a.jpg", "fp-a"))
-            .expect("upsert");
-        let id2 = upsert_file_record(&db_path, &sample_record(root_id, "b.jpg", "fp-b"))
-            .expect("upsert");
+        let id1 =
+            upsert_file_record(&db_path, &sample_record(root_id, "a.jpg", "fp-a")).expect("upsert");
+        let id2 =
+            upsert_file_record(&db_path, &sample_record(root_id, "b.jpg", "fp-b")).expect("upsert");
 
         // Only delete one — simulates partial filesystem success
         delete_file_records(&db_path, &[id1]).expect("delete");
@@ -2067,8 +2162,7 @@ mod tests {
         let file_id = upsert_file_record(&db_path, &sample_record(root_id, "info.jpg", "fp-info"))
             .expect("upsert");
 
-        let (abs_path, rel_path, thumb_path) =
-            get_file_path_info(&db_path, file_id).expect("info");
+        let (abs_path, rel_path, thumb_path) = get_file_path_info(&db_path, file_id).expect("info");
         assert_eq!(abs_path, "/tmp/demo/info.jpg");
         assert_eq!(rel_path, "info.jpg");
         assert!(thumb_path.is_none());
@@ -2107,5 +2201,137 @@ mod tests {
         let res = search_images(&db_path, &req).expect("search");
         assert_eq!(res.total, 1);
         assert_eq!(res.items[0].rel_path, "new_name.jpg");
+    }
+
+    // -----------------------------------------------------------------------
+    // Location text / metadata tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_migration_adds_location_text_column() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+
+        let conn = open_conn(&db_path).expect("open");
+        // Verify location_text column exists in files table
+        let mut stmt = conn.prepare("PRAGMA table_info(files)").expect("prepare");
+        let columns: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect");
+        assert!(columns.contains(&"location_text".to_string()));
+
+        // Verify FTS5 has 6 columns (including location_text)
+        let mut fts_stmt = conn
+            .prepare("PRAGMA table_info(files_fts)")
+            .expect("fts prepare");
+        let fts_columns: Vec<String> = fts_stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect");
+        assert_eq!(fts_columns.len(), 6);
+        assert!(fts_columns.contains(&"location_text".to_string()));
+    }
+
+    #[test]
+    fn test_upsert_with_location_text() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/demo").expect("root");
+
+        let mut rec = sample_record(root_id, "nyc.jpg", "fp-nyc");
+        rec.location_text = "New York, New York, US".to_string();
+        upsert_file_record(&db_path, &rec).expect("upsert");
+
+        let conn = open_conn(&db_path).expect("open");
+        let location: String = conn
+            .query_row(
+                "SELECT location_text FROM files WHERE root_id = ?1 AND rel_path = 'nyc.jpg'",
+                params![root_id],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert_eq!(location, "New York, New York, US");
+    }
+
+    #[test]
+    fn test_fts_matches_location_text() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/demo").expect("root");
+
+        let mut rec = sample_record(root_id, "tokyo.jpg", "fp-tokyo");
+        rec.location_text = "Tokyo, Kanto, JP".to_string();
+        upsert_file_record(&db_path, &rec).expect("upsert");
+
+        let req = SearchRequest {
+            query: "Tokyo".to_string(),
+            ..SearchRequest::default()
+        };
+        let result = search_images(&db_path, &req).expect("search");
+        assert_eq!(result.total, 1);
+        assert_eq!(result.items[0].rel_path, "tokyo.jpg");
+    }
+
+    #[test]
+    fn test_get_file_metadata() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/demo").expect("root");
+
+        let mut rec = sample_record(root_id, "meta.jpg", "fp-meta");
+        rec.media_type = "anime".to_string();
+        rec.description = "Test description".to_string();
+        rec.extracted_text = "OCR text here".to_string();
+        rec.canonical_mentions = "Character A, Character B".to_string();
+        rec.location_text = "Paris, Ile-de-France, FR".to_string();
+        let file_id = upsert_file_record(&db_path, &rec).expect("upsert");
+
+        let meta = get_file_metadata(&db_path, file_id).expect("get");
+        assert_eq!(meta.id, file_id);
+        assert_eq!(meta.media_type, "anime");
+        assert_eq!(meta.description, "Test description");
+        assert_eq!(meta.extracted_text, "OCR text here");
+        assert_eq!(meta.canonical_mentions, "Character A, Character B");
+        assert_eq!(meta.location_text, "Paris, Ile-de-France, FR");
+    }
+
+    #[test]
+    fn test_update_file_metadata() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/demo").expect("root");
+
+        let rec = sample_record(root_id, "edit.jpg", "fp-edit");
+        let file_id = upsert_file_record(&db_path, &rec).expect("upsert");
+
+        update_file_metadata(
+            &db_path,
+            file_id,
+            "document",
+            "Updated description",
+            "New OCR text",
+            "Alice, Bob",
+            "London, England, GB",
+        )
+        .expect("update");
+
+        let meta = get_file_metadata(&db_path, file_id).expect("get");
+        assert_eq!(meta.media_type, "document");
+        assert_eq!(meta.description, "Updated description");
+        assert_eq!(meta.extracted_text, "New OCR text");
+        assert_eq!(meta.canonical_mentions, "Alice, Bob");
+        assert_eq!(meta.location_text, "London, England, GB");
+
+        // Verify FTS is updated — search by new location
+        let req = SearchRequest {
+            query: "London".to_string(),
+            ..SearchRequest::default()
+        };
+        let result = search_images(&db_path, &req).expect("search");
+        assert_eq!(result.total, 1);
+        assert_eq!(result.items[0].rel_path, "edit.jpg");
     }
 }

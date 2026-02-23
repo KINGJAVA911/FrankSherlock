@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fileName, formatElapsed } from "../../utils/format";
+import { fileName, formatBytes, formatElapsed } from "../../utils/format";
 
 describe("fileName", () => {
   it("extracts filename from path with slashes", () => {
@@ -16,6 +16,28 @@ describe("fileName", () => {
 
   it("handles trailing slash edge case", () => {
     expect(fileName("folder/")).toBe("");
+  });
+});
+
+describe("formatBytes", () => {
+  it("formats bytes", () => {
+    expect(formatBytes(500)).toBe("500 B");
+  });
+
+  it("formats kilobytes", () => {
+    expect(formatBytes(2048)).toBe("2.0 KB");
+  });
+
+  it("formats megabytes", () => {
+    expect(formatBytes(5242880)).toBe("5.0 MB");
+  });
+
+  it("formats gigabytes", () => {
+    expect(formatBytes(1073741824)).toBe("1.00 GB");
+  });
+
+  it("formats zero", () => {
+    expect(formatBytes(0)).toBe("0 B");
   });
 });
 

@@ -24,3 +24,8 @@
 .statusbar-clickable:hover {
   color: var(--text-primary);
 }
+
+.statusbar-version {
+  opacity: 0.7;
+  font-size: 0.7rem;
+}

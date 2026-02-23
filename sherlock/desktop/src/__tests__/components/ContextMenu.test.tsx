@@ -9,6 +9,7 @@ const baseProps = {
   selectedCount: 1,
   onCopy: vi.fn(),
   onRename: vi.fn(),
+  onEditMetadata: vi.fn(),
   onDelete: vi.fn(),
   onClose: vi.fn(),
 };
@@ -62,5 +63,21 @@ describe("ContextMenu", () => {
   it("has menu role", () => {
     render(<ContextMenu {...baseProps} />);
     expect(screen.getByRole("menu")).toBeInTheDocument();
+  });
+
+  it("shows Edit Metadata only when exactly 1 file selected", () => {
+    const { rerender } = render(<ContextMenu {...baseProps} selectedCount={1} />);
+    expect(screen.getByText("Edit Metadata")).toBeInTheDocument();
+
+    rerender(<ContextMenu {...baseProps} selectedCount={2} />);
+    expect(screen.queryByText("Edit Metadata")).toBeNull();
+  });
+
+  it("calls onEditMetadata when Edit Metadata clicked", async () => {
+    const user = userEvent.setup();
+    const onEditMetadata = vi.fn();
+    render(<ContextMenu {...baseProps} onEditMetadata={onEditMetadata} />);
+    await user.click(screen.getByText("Edit Metadata"));
+    expect(onEditMetadata).toHaveBeenCalledOnce();
   });
 });

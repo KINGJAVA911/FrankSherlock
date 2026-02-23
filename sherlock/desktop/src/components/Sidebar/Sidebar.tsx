@@ -1,4 +1,5 @@
-import type { DbStats, RootInfo, RuntimeStatus, ScanJobStatus } from "../../types";
+import type { DbStats, RootInfo, ScanJobStatus } from "../../types";
+import { formatBytes } from "../../utils/format";
 import RootCard from "./RootCard";
 import ScanProgress from "./ScanProgress";
 import "./Sidebar.css";
@@ -7,23 +8,20 @@ type SidebarProps = {
   roots: RootInfo[];
   selectedRootId: number | null;
   activeScans: ScanJobStatus[];
-  runtime: RuntimeStatus | null;
   dbStats: DbStats | null;
   readOnly: boolean;
   setupReady: boolean;
-  isScanning: boolean;
   onSelectRoot: (rootId: number | null) => void;
   onDeleteRoot: (root: RootInfo) => void;
   onPickAndScan: () => void;
   onCancelScan: (scan: ScanJobStatus) => void;
   onResumeScan: (scan: ScanJobStatus) => void;
-  onCleanupOllama: () => void;
 };
 
 export default function Sidebar({
-  roots, selectedRootId, activeScans, runtime, dbStats, readOnly,
-  setupReady, isScanning, onSelectRoot, onDeleteRoot, onPickAndScan,
-  onCancelScan, onResumeScan, onCleanupOllama,
+  roots, selectedRootId, activeScans, dbStats, readOnly,
+  setupReady, onSelectRoot, onDeleteRoot, onPickAndScan,
+  onCancelScan, onResumeScan,
 }: SidebarProps) {
   const runningScans = activeScans.filter((s) => s.status === "running");
   const interruptedScans = activeScans.filter((s) => s.status === "interrupted");
@@ -86,16 +84,9 @@ export default function Sidebar({
 
       <div className="sidebar-section"><span>Info</span></div>
       <div className="sidebar-item">Files: <span>{dbStats?.files ?? "..."}</span></div>
-      <div className="sidebar-item">Roots: <span>{dbStats?.roots ?? "..."}</span></div>
+      <div className="sidebar-item">DB size: <span>{dbStats ? formatBytes(dbStats.dbSizeBytes) : "..."}</span></div>
+      <div className="sidebar-item">Thumbs: <span>{dbStats ? formatBytes(dbStats.thumbsSizeBytes) : "..."}</span></div>
 
-      <div className="sidebar-section"><span>Actions</span></div>
-      <button
-        type="button"
-        className="sidebar-action-btn"
-        onClick={onCleanupOllama}
-        disabled={isScanning || (runtime?.loadedModels?.length ?? 0) === 0}
-        title={isScanning ? "Cannot unload during scan" : (runtime?.loadedModels?.length ?? 0) === 0 ? "No models loaded" : "Unload all loaded models"}
-      >Unload Models</button>
     </aside>
   );
 }

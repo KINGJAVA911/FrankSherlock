@@ -1,9 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppPaths,
-  CleanupResult,
   DbStats,
   DeleteFilesResult,
+  FileMetadata,
   HealthStatus,
   PurgeResult,
   RenameFileResult,
@@ -56,10 +56,6 @@ export async function startSetupDownload(): Promise<SetupDownloadStatus> {
   return invoke<SetupDownloadStatus>("start_setup_download");
 }
 
-export async function cleanupOllamaModels(): Promise<CleanupResult> {
-  return invoke<CleanupResult>("cleanup_ollama_models");
-}
-
 export async function cancelScan(jobId: number): Promise<boolean> {
   return invoke<boolean>("cancel_scan", { jobId });
 }
@@ -90,4 +86,21 @@ export async function deleteFiles(fileIds: number[]): Promise<DeleteFilesResult>
 
 export async function renameFile(fileId: number, newName: string): Promise<RenameFileResult> {
   return invoke<RenameFileResult>("rename_file", { fileId, newName });
+}
+
+export async function getFileMetadata(fileId: number): Promise<FileMetadata> {
+  return invoke<FileMetadata>("get_file_metadata", { fileId });
+}
+
+export async function updateFileMetadata(
+  fileId: number,
+  mediaType: string,
+  description: string,
+  extractedText: string,
+  canonicalMentions: string,
+  locationText: string,
+): Promise<void> {
+  return invoke<void>("update_file_metadata", {
+    fileId, mediaType, description, extractedText, canonicalMentions, locationText,
+  });
 }

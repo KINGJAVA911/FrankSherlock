@@ -9,17 +9,14 @@ const defaultProps = {
   roots: [] as RootInfo[],
   selectedRootId: null,
   activeScans: [] as ScanJobStatus[],
-  runtime: null,
   dbStats: null,
   readOnly: false,
   setupReady: true,
-  isScanning: false,
   onSelectRoot: vi.fn(),
   onDeleteRoot: vi.fn(),
   onPickAndScan: vi.fn(),
   onCancelScan: vi.fn(),
   onResumeScan: vi.fn(),
-  onCleanupOllama: vi.fn(),
 };
 
 describe("Sidebar", () => {
@@ -49,9 +46,10 @@ describe("Sidebar", () => {
   });
 
   it("shows db stats", () => {
-    render(<Sidebar {...defaultProps} dbStats={{ files: 100, roots: 3 }} />);
+    render(<Sidebar {...defaultProps} dbStats={{ files: 100, roots: 3, dbSizeBytes: 2048000, thumbsSizeBytes: 51200000 }} />);
     expect(screen.getByText("100")).toBeInTheDocument();
-    expect(screen.getByText("3")).toBeInTheDocument();
+    expect(screen.getByText("2.0 MB")).toBeInTheDocument();
+    expect(screen.getByText("48.8 MB")).toBeInTheDocument();
   });
 
   it("disables add button when setup not ready", () => {

@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ffmpeg:*)",
+      "Bash(nvidia-smi:*)",
+      "Bash(python3:*)",
+      "Bash(pip3 list:*)",
+      "Bash(ollama list:*)",
+      "Bash(pacman -Q:*)",
+      "Bash(pacman -Qs:*)",
+      "Bash(pacman:*)",
+      "Bash(pip3 show:*)",
+      "Bash(python3.11:*)",
+      "Bash(ffprobe:*)",
+      "Bash(/home/akitaonrails/.local/bin/pip3 show:*)",
+      "Bash(numfmt:*)",
+      "Bash(uv init:*)",
+      "Bash(ollama pull:*)",
+      "Bash(uv sync:*)",
+      "Bash(uv run python:*)",
+      "Bash(git init:*)",
+      "Bash(git commit:*)",
+      "Bash(uv pip install:*)",
+      "Bash(.venv/bin/python:*)",
+      "Bash(.venv/bin/pip:*)",
+      "Bash(uv pip list:*)",
+      "Bash(CARGO_HOME=/tmp/cargo-home CARGO_HOME=/tmp/cargo-home cargo build:*)",
+      "Bash(CARGO_HOME=/tmp/cargo-home cargo build:*)",
+      "Bash(CARGO_HOME=/tmp/cargo-home cargo test:*)",
+      "Bash(CARGO_HOME=/tmp/cargo-home cargo tauri info:*)"
+    ]
+  }
+}

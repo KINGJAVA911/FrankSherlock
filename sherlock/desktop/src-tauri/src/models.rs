@@ -15,13 +15,6 @@ pub struct DbStats {
     pub thumbs_size_bytes: u64,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CleanupResult {
-    pub running_models: u64,
-    pub stopped_models: u64,
-}
-
 #[derive(Debug, Clone, serde::Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum SortField {
@@ -171,6 +164,7 @@ pub struct ScanJobState {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeStatus {
+    pub os: crate::platform::OsKind,
     pub current_model: Option<String>,
     pub loaded_models: Vec<String>,
     pub vram_used_mib: Option<u64>,
@@ -223,6 +217,18 @@ pub struct FileRecordUpsert {
     pub size_bytes: i64,
     pub fingerprint: String,
     pub scan_marker: i64,
+    pub location_text: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileMetadata {
+    pub id: i64,
+    pub media_type: String,
+    pub description: String,
+    pub extracted_text: String,
+    pub canonical_mentions: String,
+    pub location_text: String,
 }
 
 #[derive(Debug, Clone)]

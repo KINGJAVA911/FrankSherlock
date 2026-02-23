@@ -63,20 +63,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn python_venv_binary_unix_path() {
-        let venv = Path::new("/home/user/.local/share/frank_sherlock/surya_venv");
+    fn python_venv_binary_path() {
+        let venv = Path::new("test_venv");
         let bin = python_venv_binary(venv);
 
         #[cfg(target_os = "windows")]
-        assert_eq!(
-            bin,
-            PathBuf::from("/home/user/.local/share/frank_sherlock/surya_venv/Scripts/python.exe")
-        );
+        assert_eq!(bin, PathBuf::from("test_venv\\Scripts\\python.exe"));
         #[cfg(not(target_os = "windows"))]
-        assert_eq!(
-            bin,
-            PathBuf::from("/home/user/.local/share/frank_sherlock/surya_venv/bin/python")
-        );
+        assert_eq!(bin, PathBuf::from("test_venv/bin/python"));
     }
 
     #[test]

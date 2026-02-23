@@ -3,7 +3,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use crate::error::AppResult;
-use crate::models::{CleanupResult, SetupDownloadStatus};
+use crate::models::SetupDownloadStatus;
 
 #[derive(Clone, Debug)]
 pub struct DownloadState {
@@ -57,23 +57,16 @@ pub fn list_loaded_models() -> (bool, Vec<String>) {
 }
 
 /// Stop all currently loaded Ollama models.
-pub fn cleanup_loaded_models() -> AppResult<CleanupResult> {
+pub fn cleanup_loaded_models() -> AppResult<()> {
     let output = Command::new("ollama").arg("ps").output()?;
     let text = String::from_utf8_lossy(&output.stdout);
     let models = parse_ollama_table_output(&text);
 
-    let mut stopped = 0_u64;
     for model in &models {
-        let status = Command::new("ollama").args(["stop", model]).status()?;
-        if status.success() {
-            stopped += 1;
-        }
+        let _ = Command::new("ollama").args(["stop", model]).status();
     }
 
-    Ok(CleanupResult {
-        running_models: models.len() as u64,
-        stopped_models: stopped,
-    })
+    Ok(())
 }
 
 /// Run `ollama pull <model>`, streaming progress to a shared state.

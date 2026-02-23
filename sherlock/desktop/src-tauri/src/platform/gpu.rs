@@ -229,10 +229,7 @@ mod tests {
             serde_json::to_string(&GpuVendor::Nvidia).unwrap(),
             "\"nvidia\""
         );
-        assert_eq!(
-            serde_json::to_string(&GpuVendor::Amd).unwrap(),
-            "\"amd\""
-        );
+        assert_eq!(serde_json::to_string(&GpuVendor::Amd).unwrap(), "\"amd\"");
         assert_eq!(
             serde_json::to_string(&GpuVendor::Apple).unwrap(),
             "\"apple\""

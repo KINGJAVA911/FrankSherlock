@@ -50,32 +50,39 @@ describe("Toolbar", () => {
     expect(onChange).toHaveBeenCalledWith("photo");
   });
 
-  it("renders sort field select with default options", () => {
+  it("renders sort toggle buttons", () => {
     render(
       <Toolbar query="" onQueryChange={() => {}} selectedMediaType="" onMediaTypeChange={() => {}} mediaTypeOptions={mediaTypes} {...defaultSortProps} />
     );
-    const sortSelect = screen.getByLabelText("Sort field");
-    expect(sortSelect).toBeInTheDocument();
-    expect(screen.getByText("Date modified")).toBeInTheDocument();
-    expect(screen.getByText("Name")).toBeInTheDocument();
-    expect(screen.getByText("Type")).toBeInTheDocument();
-    expect(screen.queryByText("Relevance")).not.toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Sort field" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Date")).toBeInTheDocument();
+    expect(screen.getByLabelText("Name")).toBeInTheDocument();
+    expect(screen.getByLabelText("Type")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Relevance")).not.toBeInTheDocument();
   });
 
-  it("shows Relevance option when hasTextQuery is true", () => {
+  it("marks active sort button with aria-pressed", () => {
+    render(
+      <Toolbar query="" onQueryChange={() => {}} selectedMediaType="" onMediaTypeChange={() => {}} mediaTypeOptions={mediaTypes} {...defaultSortProps} />
+    );
+    expect(screen.getByLabelText("Date")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByLabelText("Name")).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("shows Relevance toggle when hasTextQuery is true", () => {
     render(
       <Toolbar query="" onQueryChange={() => {}} selectedMediaType="" onMediaTypeChange={() => {}} mediaTypeOptions={mediaTypes} {...defaultSortProps} hasTextQuery={true} />
     );
-    expect(screen.getByText("Relevance")).toBeInTheDocument();
+    expect(screen.getByLabelText("Relevance")).toBeInTheDocument();
   });
 
-  it("calls onSortByChange on sort select change", async () => {
+  it("calls onSortByChange when clicking a sort toggle", async () => {
     const user = userEvent.setup();
     const onSortByChange = vi.fn();
     render(
       <Toolbar query="" onQueryChange={() => {}} selectedMediaType="" onMediaTypeChange={() => {}} mediaTypeOptions={mediaTypes} {...defaultSortProps} onSortByChange={onSortByChange} />
     );
-    await user.selectOptions(screen.getByLabelText("Sort field"), "name");
+    await user.click(screen.getByLabelText("Name"));
     expect(onSortByChange).toHaveBeenCalledWith("name");
   });
 

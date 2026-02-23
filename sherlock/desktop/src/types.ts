@@ -74,12 +74,8 @@ export type DbStats = {
   thumbsSizeBytes: number;
 };
 
-export type CleanupResult = {
-  runningModels: number;
-  stoppedModels: number;
-};
-
 export type RuntimeStatus = {
+  os: "linux" | "macos" | "windows";
   currentModel?: string | null;
   loadedModels: string[];
   vramUsedMib?: number | null;
@@ -149,4 +145,13 @@ export type RenameFileResult = {
   newRelPath: string;
   newAbsPath: string;
   newFilename: string;
+};
+
+export type FileMetadata = {
+  id: number;
+  mediaType: string;
+  description: string;
+  extractedText: string;
+  canonicalMentions: string;
+  locationText: string;
 };

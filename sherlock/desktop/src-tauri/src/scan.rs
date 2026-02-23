@@ -15,6 +15,7 @@ use crate::error::AppResult;
 use crate::models::{
     ClassificationResult, ExistingFile, FileRecordUpsert, ScanContext, ScanJobStatus, ScanSummary,
 };
+use crate::platform::paths::normalize_rel_path;
 use crate::thumbnail;
 
 const IMAGE_EXTS: [&str; 8] = [
@@ -258,6 +259,7 @@ fn run_scan_job_internal(
 struct ClassifyAndThumbResult {
     classification: ClassificationResult,
     thumb_path: Option<String>,
+    location_text: String,
 }
 
 fn classify_and_thumbnail(
@@ -277,9 +279,12 @@ fn classify_and_thumbnail(
 
     let thumb_path = thumbnail::generate_thumbnail(abs, &ctx.thumbnails_dir, &probe.rel_path);
 
+    let exif_location = crate::exif::extract_location(abs);
+
     ClassifyAndThumbResult {
         classification,
         thumb_path,
+        location_text: exif_location.location_text,
     }
 }
 
@@ -315,8 +320,8 @@ fn collect_image_probes_incremental(
         let metadata = std::fs::metadata(path)?;
         let rel = path
             .strip_prefix(root)
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_else(|_| path.to_string_lossy().replace('\\', "/"));
+            .map(|p| normalize_rel_path(&p.to_string_lossy()))
+            .unwrap_or_else(|_| normalize_rel_path(&path.to_string_lossy()));
         let filename = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -393,6 +398,7 @@ fn probe_to_record(
         size_bytes: probe.size_bytes,
         fingerprint: probe.fingerprint.clone(),
         scan_marker,
+        location_text: result.location_text.clone(),
     }
 }
 
@@ -410,12 +416,9 @@ fn cleanup_deleted_caches(db_path: &Path, root_id: i64, deleted_at: i64, thumbna
             let _ = std::fs::remove_file(&tp);
         }
         // Also try the expected path
-        let expected_thumb = thumbnails_dir.join(
-            Path::new(&rel_path)
-                .with_extension("jpg")
-                .to_string_lossy()
-                .replace('\\', "/"),
-        );
+        let expected_thumb = thumbnails_dir.join(normalize_rel_path(
+            &Path::new(&rel_path).with_extension("jpg").to_string_lossy(),
+        ));
         let _ = std::fs::remove_file(&expected_thumb);
     }
 }
@@ -531,6 +534,7 @@ mod tests {
             size_bytes: metadata.len() as i64,
             fingerprint: fp,
             scan_marker: 1,
+            location_text: String::new(),
         };
         db::upsert_file_record(&db_path, &rec).expect("upsert");
 

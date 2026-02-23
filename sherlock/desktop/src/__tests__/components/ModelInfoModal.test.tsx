@@ -5,6 +5,7 @@ import ModelInfoModal from "../../components/modals/ModelInfoModal";
 import type { RuntimeStatus, SetupStatus } from "../../types";
 
 const mockRuntime: RuntimeStatus = {
+  os: "linux",
   currentModel: "qwen2.5vl:7b",
   loadedModels: ["qwen2.5vl:7b"],
   vramUsedMib: 4096,

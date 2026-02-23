@@ -1,0 +1,56 @@
+.edit-metadata-modal {
+  width: 420px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.edit-metadata-modal label {
+  display: block;
+  margin-bottom: 10px;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.edit-metadata-modal label span {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.edit-metadata-modal select,
+.edit-metadata-modal input,
+.edit-metadata-modal textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 5px 8px;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--font-size-sm);
+}
+
+.edit-metadata-modal select:focus,
+.edit-metadata-modal input:focus,
+.edit-metadata-modal textarea:focus {
+  outline: none;
+  border-color: var(--border-focus);
+}
+
+.edit-metadata-modal textarea {
+  resize: vertical;
+}
+
+.edit-metadata-loading {
+  text-align: center;
+  padding: 20px 0;
+  color: var(--text-secondary);
+}
+
+.edit-metadata-error {
+  color: var(--text-error, #e55);
+  font-size: var(--font-size-sm);
+  margin: 0 0 8px;
+}

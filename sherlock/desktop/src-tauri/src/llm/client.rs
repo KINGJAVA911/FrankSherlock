@@ -56,18 +56,19 @@ pub fn ollama_generate(
         }
     }
 
-    let agent = ureq::AgentBuilder::new()
-        .timeout_read(Duration::from_secs(timeout_secs))
-        .timeout_write(Duration::from_secs(30))
-        .build();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_recv_body(Some(Duration::from_secs(timeout_secs)))
+        .timeout_send_body(Some(Duration::from_secs(30)))
+        .build()
+        .into();
 
     let result = agent
         .post("http://localhost:11434/api/generate")
         .send_json(&payload);
 
     match result {
-        Ok(resp) => {
-            let body: String = match resp.into_string() {
+        Ok(mut resp) => {
+            let body: String = match resp.body_mut().read_to_string() {
                 Ok(s) => s,
                 Err(e) => {
                     return OllamaResponse::error(format!("read_error: {e}"));

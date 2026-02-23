@@ -23,8 +23,61 @@
   width: 140px;
 }
 
-.toolbar-sort-select {
-  width: 130px;
+/* ── Sort toggle button group ──────────────────────────────── */
+.sort-toggles {
+  display: flex;
+  flex-shrink: 0;
+}
+
+.sort-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-primary);
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-size-sm);
+  line-height: 1;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+
+.sort-toggle:first-child {
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+}
+
+.sort-toggle:last-child {
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.sort-toggle + .sort-toggle {
+  border-left: none;
+}
+
+.sort-toggle:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.sort-toggle-active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.sort-toggle-active + .sort-toggle {
+  border-left: 1px solid var(--border-primary);
+}
+
+.sort-toggle-active:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+.sort-toggle svg {
+  flex-shrink: 0;
 }
 
 .toolbar-sort-dir {

@@ -1,8 +1,9 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { cleanupOllamaModels, copyFilesToClipboard, deleteFiles, ensureDatabase, removeRoot, renameFile } from "./api";
+import { copyFilesToClipboard, deleteFiles, ensureDatabase, removeRoot, renameFile, updateFileMetadata } from "./api";
 import type {
   DbStats,
+  FileMetadata,
   RootInfo,
   RuntimeStatus,
   SearchItem,
@@ -26,6 +27,7 @@ import ConfirmDeleteModal from "./components/modals/ConfirmDeleteModal";
 import ConfirmFileDeleteModal from "./components/modals/ConfirmFileDeleteModal";
 import RenameModal from "./components/modals/RenameModal";
 import HelpModal from "./components/modals/HelpModal";
+import EditMetadataModal from "./components/modals/EditMetadataModal";
 import ModelInfoModal from "./components/modals/ModelInfoModal";
 import { useToast } from "./hooks/useToast";
 import { useUserConfig } from "./hooks/useUserConfig";
@@ -61,6 +63,7 @@ export default function App() {
   const [confirmDeleteFiles, setConfirmDeleteFiles] = useState<SearchItem[] | null>(null);
   const [renameItem, setRenameItem] = useState<SearchItem | null>(null);
   const [showModelInfo, setShowModelInfo] = useState(false);
+  const [editMetadataItem, setEditMetadataItem] = useState<SearchItem | null>(null);
 
   /* ── Refs ── */
   const sentinelRef = useRef<HTMLDivElement>(null);
@@ -105,7 +108,7 @@ export default function App() {
   usePolling(POLL_MS, scanManager.pollRuntimeAndScans, [scanManager.trackedJobIds]);
   useInfiniteScroll(sentinelRef, onLoadMore, [items.length, total, loadingMore]);
 
-  const hasModalOpen = !!(confirmDeleteFiles || renameItem);
+  const hasModalOpen = !!(confirmDeleteFiles || renameItem || editMetadataItem);
 
   const onRequestDelete = useCallback(() => {
     const filesToDelete = [...selectedIndices].sort((a, b) => a - b)
@@ -168,8 +171,8 @@ export default function App() {
 
   /* ── Handlers ── */
   function onWindowClose() {
-    cleanupOllamaModels().catch(() => {});
-    void getCurrentWindow().destroy();
+    // Rust on_window_event(CloseRequested) handles model cleanup
+    void getCurrentWindow().close();
   }
 
   async function onDeleteRoot(root: RootInfo) {
@@ -231,6 +234,13 @@ export default function App() {
     onRequestDelete();
   }
 
+  function handleContextEditMetadata() {
+    setContextMenu(null);
+    if (selectedIndices.size !== 1) return;
+    const idx = [...selectedIndices][0];
+    if (idx < items.length) setEditMetadataItem(items[idx]);
+  }
+
   async function handleDeleteFiles() {
     if (!confirmDeleteFiles) return;
     const ids = confirmDeleteFiles.map(f => f.id);
@@ -259,6 +269,24 @@ export default function App() {
       clearSelection();
       await runSearch(0, false);
       setNotice(`Renamed to "${newName}"`);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
+  async function handleSaveMetadata(data: FileMetadata) {
+    setEditMetadataItem(null);
+    try {
+      await updateFileMetadata(
+        data.id,
+        data.mediaType,
+        data.description,
+        data.extractedText,
+        data.canonicalMentions,
+        data.locationText,
+      );
+      await runSearch(0, false);
+      setNotice("Metadata updated");
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -323,8 +351,16 @@ export default function App() {
           selectedCount={selectedIndices.size}
           onCopy={handleContextCopy}
           onRename={handleContextRename}
+          onEditMetadata={handleContextEditMetadata}
           onDelete={handleContextDelete}
           onClose={() => setContextMenu(null)}
+        />
+      )}
+      {editMetadataItem && (
+        <EditMetadataModal
+          fileId={editMetadataItem.id}
+          onSave={handleSaveMetadata}
+          onCancel={() => setEditMetadataItem(null)}
         />
       )}
 
@@ -344,17 +380,14 @@ export default function App() {
           roots={roots}
           selectedRootId={selectedRootId}
           activeScans={scanManager.activeScans}
-          runtime={runtime}
           dbStats={dbStats}
           readOnly={readOnly}
           setupReady={setup ? setup.isReady : false}
-          isScanning={isScanning}
           onSelectRoot={setSelectedRootId}
           onDeleteRoot={(root) => setConfirmDeleteRoot(root)}
           onPickAndScan={() => scanManager.onPickAndScan(setup, readOnly)}
           onCancelScan={(scan) => scanManager.onCancelScan(scan, readOnly)}
           onResumeScan={(scan) => scanManager.onResumeScan(scan, readOnly)}
-          onCleanupOllama={scanManager.onCleanupOllama}
         />
 
         <Content
@@ -388,7 +421,6 @@ export default function App() {
       {/* ── Status Bar ── */}
       <StatusBar
         runtime={runtime}
-        dbStats={dbStats}
         isScanning={isScanning}
         runningScansCount={runningScansCount}
         selectedCount={selectedIndices.size}

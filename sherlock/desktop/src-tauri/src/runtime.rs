@@ -5,6 +5,7 @@ pub fn gather_runtime_status() -> RuntimeStatus {
     let gpu = crate::platform::gpu::detect_gpu_memory();
 
     RuntimeStatus {
+        os: crate::platform::current_os(),
         current_model: loaded_models.first().cloned(),
         loaded_models,
         vram_used_mib: gpu.vram_used_mib,

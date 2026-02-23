@@ -7,12 +7,13 @@ type Props = {
   selectedCount: number;
   onCopy: () => void;
   onRename: () => void;
+  onEditMetadata: () => void;
   onDelete: () => void;
   onClose: () => void;
 };
 
 export default function ContextMenu({
-  x, y, selectedCount, onCopy, onRename, onDelete, onClose,
+  x, y, selectedCount, onCopy, onRename, onEditMetadata, onDelete, onClose,
 }: Props) {
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -68,6 +69,12 @@ export default function ContextMenu({
         <button className="context-menu-item" role="menuitem" onClick={onRename}>
           <span>Rename</span>
           <span className="context-menu-shortcut">F2</span>
+        </button>
+      )}
+
+      {selectedCount === 1 && (
+        <button className="context-menu-item" role="menuitem" onClick={onEditMetadata}>
+          <span>Edit Metadata</span>
         </button>
       )}
 

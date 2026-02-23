@@ -14,11 +14,29 @@ type Props = {
   hasTextQuery: boolean;
 };
 
+const sortOptions: { value: SortField; label: string; icon: JSX.Element; requiresQuery?: boolean }[] = [
+  {
+    value: "relevance", label: "Relevance", requiresQuery: true,
+    icon: <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1l2.1 4.3 4.7.7-3.4 3.3.8 4.7L8 11.8 3.8 14l.8-4.7L1.2 6l4.7-.7z"/></svg>,
+  },
+  {
+    value: "dateModified", label: "Date",
+    icon: <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M12 2h1.5A1.5 1.5 0 0115 3.5v10a1.5 1.5 0 01-1.5 1.5h-11A1.5 1.5 0 011 13.5v-10A1.5 1.5 0 012.5 2H4V.5h1.5V2h5V.5H12V2zM2.5 6v7.5h11V6h-11z"/></svg>,
+  },
+  {
+    value: "name", label: "Name",
+    icon: <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M1 3h3.2L6 8.4 7.8 3H11L7 14H5.2L1 3zm11.5 0H15l-2.2 11h-2.3l2-11z"/></svg>,
+  },
+  {
+    value: "type", label: "Type",
+    icon: <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M2 1h5l1 1.5H14a1 1 0 011 1V13a1 1 0 01-1 1H2a1 1 0 01-1-1V2a1 1 0 011-1zm0 4v8h12V5H2z"/></svg>,
+  },
+];
+
 export default function Toolbar({
   query, onQueryChange, selectedMediaType, onMediaTypeChange, mediaTypeOptions,
   sortBy, onSortByChange, sortOrder, onSortOrderChange, hasTextQuery,
 }: Props) {
-  // When the text query is cleared, switch away from relevance sort
   useEffect(() => {
     if (!hasTextQuery && sortBy === "relevance") {
       onSortByChange("dateModified");
@@ -29,7 +47,7 @@ export default function Toolbar({
     <div className="toolbar">
       <input
         type="search"
-        placeholder="Search images..."
+        placeholder="e.g. beach sunset photo:yes — F1 for help"
         value={query}
         onChange={(e) => onQueryChange(e.target.value)}
         aria-label="Search query"
@@ -45,17 +63,23 @@ export default function Toolbar({
           </option>
         ))}
       </select>
-      <select
-        className="toolbar-sort-select"
-        value={sortBy}
-        onChange={(e) => onSortByChange(e.target.value as SortField)}
-        aria-label="Sort field"
-      >
-        {hasTextQuery && <option value="relevance">Relevance</option>}
-        <option value="dateModified">Date modified</option>
-        <option value="name">Name</option>
-        <option value="type">Type</option>
-      </select>
+      <div className="sort-toggles" role="group" aria-label="Sort field">
+        {sortOptions
+          .filter((opt) => !opt.requiresQuery || hasTextQuery)
+          .map((opt) => (
+            <button
+              key={opt.value}
+              className={`sort-toggle${sortBy === opt.value ? " sort-toggle-active" : ""}`}
+              onClick={() => onSortByChange(opt.value)}
+              title={opt.label}
+              aria-label={opt.label}
+              aria-pressed={sortBy === opt.value}
+            >
+              {opt.icon}
+              <span>{opt.label}</span>
+            </button>
+          ))}
+      </div>
       {sortBy !== "relevance" && (
         <button
           className="toolbar-sort-dir"

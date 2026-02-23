@@ -3,7 +3,6 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   appHealth,
   cancelScan,
-  cleanupOllamaModels,
   ensureDatabase,
   getRuntimeStatus,
   getScanJob,
@@ -203,16 +202,6 @@ export function useScanManager(cb: ScanManagerCallbacks) {
     await pollRuntimeAndScans();
   }
 
-  async function onCleanupOllama() {
-    try {
-      const result = await cleanupOllamaModels();
-      cb.setNotice(`Unloaded ${result.stoppedModels}/${result.runningModels} model(s).`);
-      await pollRuntimeAndScans();
-    } catch (err) {
-      cb.setError(errorMessage(err));
-    }
-  }
-
   async function onSetupDownload() {
     try {
       await startSetupDownload();
@@ -237,7 +226,6 @@ export function useScanManager(cb: ScanManagerCallbacks) {
     onCancelScan,
     onResumeScan,
     onResumeAllInterrupted,
-    onCleanupOllama,
     onSetupDownload,
     onRecheckSetup,
     refreshRoots,

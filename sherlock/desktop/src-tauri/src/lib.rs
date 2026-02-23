@@ -2,6 +2,7 @@ mod classify;
 mod config;
 mod db;
 mod error;
+mod exif;
 mod llm;
 mod models;
 mod platform;
@@ -17,9 +18,8 @@ use std::sync::{Arc, Mutex};
 use config::{prepare_dirs, resolve_paths, AppPaths};
 use error::AppError;
 use models::{
-    CleanupResult, DeleteFilesResult, HealthCheckOutcome, HealthStatus, PurgeResult,
-    RenameFileResult, RootInfo, RuntimeStatus, ScanJobStatus, SearchRequest, SearchResponse,
-    SetupDownloadStatus, SetupStatus,
+    DeleteFilesResult, HealthCheckOutcome, HealthStatus, PurgeResult, RenameFileResult, RootInfo,
+    RuntimeStatus, ScanJobStatus, SearchRequest, SearchResponse, SetupDownloadStatus, SetupStatus,
 };
 use tauri::Manager;
 use tauri::State;
@@ -199,11 +199,6 @@ fn get_runtime_status() -> RuntimeStatus {
 }
 
 #[tauri::command]
-fn cleanup_ollama_models() -> Result<CleanupResult, String> {
-    llm::cleanup_loaded_models().map_err(|e| e.to_string())
-}
-
-#[tauri::command]
 fn cancel_scan(job_id: i64, state: State<'_, AppState>) -> Result<bool, String> {
     require_writable(state.inner())?;
     let flags = state
@@ -236,7 +231,10 @@ fn copy_files_to_clipboard(paths: Vec<String>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn delete_files(file_ids: Vec<i64>, state: State<'_, AppState>) -> Result<DeleteFilesResult, String> {
+fn delete_files(
+    file_ids: Vec<i64>,
+    state: State<'_, AppState>,
+) -> Result<DeleteFilesResult, String> {
     require_writable(state.inner())?;
 
     // Phase 1: collect file info from DB (read-only, no mutation)
@@ -308,8 +306,8 @@ fn rename_file(
         .ok_or_else(|| "Cannot determine parent directory".to_string())?;
     let new_abs_str = new_abs_path.to_string_lossy().to_string();
 
-    let new_rel = if let Some(idx) = old_rel.rfind('/') {
-        format!("{}/{}", &old_rel[..idx], new_name)
+    let new_rel = if let Some(parent) = platform::paths::rel_path_parent(&old_rel) {
+        format!("{parent}/{new_name}")
     } else {
         new_name.clone()
     };
@@ -318,7 +316,13 @@ fn rename_file(
     std::fs::rename(&old_abs, &new_abs_path).map_err(|e| format!("Rename failed: {e}"))?;
 
     // Phase 2: update DB — rollback filesystem rename on failure
-    if let Err(e) = db::rename_file_record(&state.paths.db_file, file_id, &new_rel, &new_abs_str, &new_name) {
+    if let Err(e) = db::rename_file_record(
+        &state.paths.db_file,
+        file_id,
+        &new_rel,
+        &new_abs_str,
+        &new_name,
+    ) {
         // Attempt to restore the original filename on disk
         if let Err(rollback_err) = std::fs::rename(&new_abs_path, &old_abs) {
             log::error!(
@@ -329,7 +333,9 @@ fn rename_file(
                 "Rename partially failed: DB error ({e}) and could not restore original filename ({rollback_err})"
             ));
         }
-        return Err(format!("Rename failed (DB update error, filesystem restored): {e}"));
+        return Err(format!(
+            "Rename failed (DB update error, filesystem restored): {e}"
+        ));
     }
 
     Ok(RenameFileResult {
@@ -338,6 +344,37 @@ fn rename_file(
         new_abs_path: new_abs_str,
         new_filename: new_name,
     })
+}
+
+#[tauri::command]
+fn get_file_metadata(
+    file_id: i64,
+    state: State<'_, AppState>,
+) -> Result<models::FileMetadata, String> {
+    db::get_file_metadata(&state.paths.db_file, file_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_file_metadata(
+    file_id: i64,
+    media_type: String,
+    description: String,
+    extracted_text: String,
+    canonical_mentions: String,
+    location_text: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    require_writable(state.inner())?;
+    db::update_file_metadata(
+        &state.paths.db_file,
+        file_id,
+        &media_type,
+        &description,
+        &extracted_text,
+        &canonical_mentions,
+        &location_text,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -368,13 +405,36 @@ fn compute_setup_status(app_state: &AppState) -> SetupStatus {
     };
 
     let python_status = platform::python::check_python_available(&app_state.paths.surya_venv_dir);
+    let os = platform::current_os();
 
     let mut instructions = if !ollama_available {
-        vec![
-            "Start Ollama service first.".to_string(),
-            "Terminal option: run `ollama serve`".to_string(),
-            "Then click 'Recheck setup' in the app.".to_string(),
-        ]
+        let mut steps = vec!["Ollama is not detected.".to_string()];
+        match os {
+            platform::OsKind::Linux => {
+                steps.push(
+                    "Install: curl -fsSL https://ollama.com/install.sh | sh".to_string(),
+                );
+                steps
+                    .push("Start: ollama serve (or: systemctl start ollama)".to_string());
+            }
+            platform::OsKind::MacOS => {
+                steps.push(
+                    "Install: brew install ollama (or download from ollama.com/download)"
+                        .to_string(),
+                );
+                steps.push(
+                    "Start the Ollama app from Applications, or run: ollama serve".to_string(),
+                );
+            }
+            platform::OsKind::Windows => {
+                steps.push("Install: download from ollama.com/download".to_string());
+                steps.push(
+                    "Start Ollama from the Start Menu, or run: ollama serve".to_string(),
+                );
+            }
+        }
+        steps.push("Then click 'Recheck' above.".to_string());
+        steps
     } else if !missing_models.is_empty() {
         vec![
             format!("Download required model(s): {}", missing_models.join(", ")),
@@ -386,10 +446,35 @@ fn compute_setup_status(app_state: &AppState) -> SetupStatus {
 
     // Surya/Python is a soft requirement (OCR enrichment)
     if !python_status.venv_exists {
-        instructions
-            .push("OCR: Python venv not found. Run setup to create Surya venv.".to_string());
+        match os {
+            platform::OsKind::Linux => {
+                instructions.push(
+                    "OCR (optional): Python venv not found. Install Python 3 \
+                     (e.g. sudo apt install python3 python3-venv) then relaunch."
+                        .to_string(),
+                );
+            }
+            platform::OsKind::MacOS => {
+                instructions.push(
+                    "OCR (optional): Python venv not found. Install Python 3 \
+                     (e.g. brew install python@3) then relaunch."
+                        .to_string(),
+                );
+            }
+            platform::OsKind::Windows => {
+                instructions.push(
+                    "OCR (optional): Python venv not found. Install Python 3 \
+                     from python.org/downloads, then relaunch."
+                        .to_string(),
+                );
+            }
+        }
     } else if !python_status.available {
-        instructions.push("OCR: Python interpreter not working in Surya venv.".to_string());
+        instructions.push(
+            "OCR: Python interpreter not working in Surya venv. \
+             Try deleting the surya_venv directory and relaunching."
+                .to_string(),
+        );
     }
 
     let download = app_state
@@ -475,34 +560,41 @@ fn spawn_scan_worker_if_needed(app_state: AppState, app_handle: &tauri::AppHandl
         .map_err(|e| AppError::Join(e.to_string()))
         .and_then(|v| v);
 
-        match &result {
-            Ok(_) => {
-                if let Err(e) = llm::cleanup_loaded_models() {
-                    log::warn!("Auto-cleanup after scan failed: {e}");
-                }
-                // WAL checkpoint + backup after successful scan
-                if let Err(e) = db::wal_checkpoint(&app_state_for_task.paths.db_file) {
-                    log::warn!("WAL checkpoint after scan failed: {e}");
-                }
-                let backup_path = app_state_for_task.paths.db_dir.join("index.sqlite.bak");
-                if let Err(e) = db::backup_database(&app_state_for_task.paths.db_file, &backup_path)
-                {
-                    log::warn!("Post-scan backup failed: {e}");
-                }
+        if let Err(err) = &result {
+            let _ = db::fail_scan_job(
+                &app_state_for_task.paths.db_file,
+                job_id,
+                &format!("scan failed: {err}"),
+            );
+        }
+
+        // Remove from tracking before checking if all jobs finished
+        let mut guard = jobs.lock().expect("scan job mutex poisoned");
+        guard.remove(&job_id);
+        let all_jobs_done = guard.is_empty();
+        drop(guard);
+
+        let mut flags = cancel_flags.lock().expect("cancel flags mutex poisoned");
+        flags.remove(&job_id);
+        drop(flags);
+
+        if result.is_ok() {
+            // WAL checkpoint + backup after each successful scan
+            if let Err(e) = db::wal_checkpoint(&app_state_for_task.paths.db_file) {
+                log::warn!("WAL checkpoint after scan failed: {e}");
             }
-            Err(err) => {
-                let _ = db::fail_scan_job(
-                    &app_state_for_task.paths.db_file,
-                    job_id,
-                    &format!("scan failed: {err}"),
-                );
+            let backup_path = app_state_for_task.paths.db_dir.join("index.sqlite.bak");
+            if let Err(e) = db::backup_database(&app_state_for_task.paths.db_file, &backup_path) {
+                log::warn!("Post-scan backup failed: {e}");
             }
         }
 
-        let mut guard = jobs.lock().expect("scan job mutex poisoned");
-        guard.remove(&job_id);
-        let mut flags = cancel_flags.lock().expect("cancel flags mutex poisoned");
-        flags.remove(&job_id);
+        // Only unload models once ALL scan jobs have finished
+        if all_jobs_done {
+            if let Err(e) = llm::cleanup_loaded_models() {
+                log::warn!("Auto-cleanup after all scans finished: {e}");
+            }
+        }
     });
 }
 
@@ -606,7 +698,6 @@ pub fn run() {
             get_scan_job,
             list_active_scans,
             get_runtime_status,
-            cleanup_ollama_models,
             cancel_scan,
             remove_root,
             list_roots,
@@ -614,7 +705,9 @@ pub fn run() {
             save_user_config,
             copy_files_to_clipboard,
             delete_files,
-            rename_file
+            rename_file,
+            get_file_metadata,
+            update_file_metadata
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

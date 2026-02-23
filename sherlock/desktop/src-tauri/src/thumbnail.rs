@@ -1,14 +1,13 @@
 use std::path::{Path, PathBuf};
 
+use crate::platform::paths::normalize_rel_path;
+
 /// Generate a thumbnail for the given source image.
 ///
 /// Returns the absolute path to the thumbnail, or `None` if generation fails.
 /// Skips regeneration if the thumbnail already exists and the source hasn't changed.
 pub fn generate_thumbnail(source_path: &Path, thumb_dir: &Path, rel_path: &str) -> Option<String> {
-    let stem = Path::new(rel_path)
-        .with_extension("jpg")
-        .to_string_lossy()
-        .replace('\\', "/");
+    let stem = normalize_rel_path(&Path::new(rel_path).with_extension("jpg").to_string_lossy());
     let thumb_path = thumb_dir.join(&stem);
 
     // Skip if thumbnail already exists and source mtime hasn't changed
