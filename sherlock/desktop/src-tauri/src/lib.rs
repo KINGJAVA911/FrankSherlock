@@ -9,7 +9,7 @@ mod scan;
 mod thumbnail;
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -233,6 +233,52 @@ fn remove_root(root_id: i64, state: State<'_, AppState>) -> Result<PurgeResult, 
 #[tauri::command]
 fn list_roots(state: State<'_, AppState>) -> Result<Vec<RootInfo>, String> {
     db::list_roots(&state.paths.db_file).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn copy_files_to_clipboard(paths: Vec<String>) -> Result<(), String> {
+    let text = paths.join("\n");
+
+    // Linux: use native clipboard tools which handle persistence correctly
+    #[cfg(target_os = "linux")]
+    {
+        // wl-copy (Wayland)
+        if try_pipe_to_clipboard("wl-copy", &[], &text) {
+            return Ok(());
+        }
+        // xclip (X11)
+        if try_pipe_to_clipboard("xclip", &["-selection", "clipboard"], &text) {
+            return Ok(());
+        }
+        // xsel (X11 alternative)
+        if try_pipe_to_clipboard("xsel", &["--clipboard", "--input"], &text) {
+            return Ok(());
+        }
+    }
+
+    // macOS/Windows or Linux fallback: arboard
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    clipboard.set_text(&text).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn try_pipe_to_clipboard(cmd: &str, args: &[&str], text: &str) -> bool {
+    let Ok(mut child) = Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        if stdin.write_all(text.as_bytes()).is_err() {
+            return false;
+        }
+    }
+    child.wait().is_ok_and(|s| s.success())
 }
 
 #[tauri::command]
@@ -579,7 +625,8 @@ pub fn run() {
             remove_root,
             list_roots,
             load_user_config,
-            save_user_config
+            save_user_config,
+            copy_files_to_clipboard
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

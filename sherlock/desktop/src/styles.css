@@ -567,6 +567,11 @@ select:disabled {
   box-shadow: 0 0 0 2px var(--accent);
 }
 
+.tile-focused {
+  outline: 1px dashed rgba(255,255,255,0.5);
+  outline-offset: -3px;
+}
+
 .tile:focus-visible {
   border-color: var(--accent);
   outline: none;
@@ -966,13 +971,39 @@ select:disabled {
   display: grid;
   place-items: center;
   overflow: hidden;
-  max-height: 70vh;
+  min-height: 0;
   background: #000;
 }
 
 .preview-image-wrap img {
   max-width: 100%;
-  max-height: 70vh;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+/* ── Collage preview ───────────────────────────────────────── */
+.preview-collage {
+  display: grid;
+  gap: 2px;
+  background: #000;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.preview-collage[data-count="2"] { grid-template-columns: 1fr 1fr; }
+.preview-collage[data-count="3"] { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+.preview-collage[data-count="3"] .preview-collage-cell:last-child { grid-column: 1 / -1; }
+.preview-collage[data-count="4"] { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+
+.preview-collage-cell {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  min-height: 0;
+}
+.preview-collage-cell img {
+  max-width: 100%;
+  max-height: 100%;
   object-fit: contain;
 }
 

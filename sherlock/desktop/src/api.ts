@@ -77,3 +77,7 @@ export async function loadUserConfig(): Promise<Record<string, unknown>> {
 export async function saveUserConfig(config: Record<string, unknown>): Promise<void> {
   return invoke<void>("save_user_config", { config });
 }
+
+export async function copyFilesToClipboard(paths: string[]): Promise<void> {
+  return invoke<void>("copy_files_to_clipboard", { paths });
+}

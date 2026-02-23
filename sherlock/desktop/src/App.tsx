@@ -6,6 +6,7 @@ import {
   appHealth,
   cancelScan,
   cleanupOllamaModels,
+  copyFilesToClipboard,
   ensureDatabase,
   getRuntimeStatus,
   getScanJob,
@@ -50,7 +51,9 @@ export default function App() {
   const [activeScans, setActiveScans] = useState<ScanJobStatus[]>([]);
   const [trackedJobId, setTrackedJobId] = useState<number | null>(null);
   const [latestJob, setLatestJob] = useState<ScanJobStatus | null>(null);
-  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const [selectedIndices, setSelectedIndices] = useState<Set<number>>(new Set());
+  const [focusIndex, setFocusIndex] = useState<number | null>(null);
+  const [anchorIndex, setAnchorIndex] = useState<number | null>(null);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [zoom, setZoom] = useState(1.25);
@@ -72,9 +75,11 @@ export default function App() {
     []
   );
 
-  const previewItem = previewOpen && selectedIndex != null && selectedIndex < items.length
-    ? items[selectedIndex]
-    : null;
+  const previewItems: SearchItem[] = previewOpen
+    ? [...selectedIndices].sort((a, b) => a - b).slice(0, 4).filter(i => i < items.length).map(i => items[i])
+    : [];
+
+  const singlePreviewIndex = selectedIndices.size === 1 ? [...selectedIndices][0] : null;
 
   const currentScan =
     (trackedJobId ? activeScans.find((job) => job.id === trackedJobId) : null) ??
@@ -224,7 +229,7 @@ export default function App() {
     return () => observer.disconnect();
   }, []);
 
-  // Unified keyboard handler: navigation, preview toggle, escape
+  // Unified keyboard handler: navigation, preview toggle, escape, copy, select-all
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       const tag = (e.target as HTMLElement)?.tagName;
@@ -237,8 +242,10 @@ export default function App() {
           setConfirmDeleteRoot(null);
         } else if (previewOpen) {
           setPreviewOpen(false);
-        } else if (selectedIndex != null) {
-          setSelectedIndex(null);
+        } else if (selectedIndices.size > 0) {
+          setSelectedIndices(new Set());
+          setFocusIndex(null);
+          setAnchorIndex(null);
         }
         return;
       }
@@ -246,48 +253,77 @@ export default function App() {
       // Ignore nav keys when non-preview modals are open
       if (showResumeModal || confirmDeleteRoot || (setup && !setup.isReady)) return;
 
+      // Ctrl+C: copy selected file paths to clipboard
+      if ((e.ctrlKey || e.metaKey) && e.key === "c") {
+        e.preventDefault();
+        const paths = [...selectedIndices].sort((a, b) => a - b)
+          .filter(i => i < items.length)
+          .map(i => items[i].absPath);
+        if (paths.length > 0) {
+          copyFilesToClipboard(paths).catch(() => {});
+          setNotice(`Copied ${paths.length} file path(s)`);
+        }
+        return;
+      }
+
+      // Ctrl+A: select all loaded items
+      if ((e.ctrlKey || e.metaKey) && e.key === "a") {
+        e.preventDefault();
+        setSelectedIndices(new Set(items.map((_, i) => i)));
+        return;
+      }
+
       const cols = columnsRef.current;
+      const isShift = e.shiftKey;
 
       if (e.key === "ArrowRight") {
         e.preventDefault();
-        setSelectedIndex((prev) => {
-          const next = prev == null ? 0 : Math.min(prev + 1, items.length - 1);
-          scrollTileIntoView(next);
-          autoLoadIfNeeded(next);
-          return next;
-        });
+        const next = focusIndex == null ? 0 : Math.min(focusIndex + 1, items.length - 1);
+        if (isShift && anchorIndex != null) {
+          rangeSelect(anchorIndex, next);
+        } else {
+          selectOnly(next);
+        }
+        scrollTileIntoView(next);
+        autoLoadIfNeeded(next);
       } else if (e.key === "ArrowLeft") {
         e.preventDefault();
-        setSelectedIndex((prev) => {
-          const next = prev == null ? 0 : Math.max(prev - 1, 0);
-          scrollTileIntoView(next);
-          return next;
-        });
+        const next = focusIndex == null ? 0 : Math.max(focusIndex - 1, 0);
+        if (isShift && anchorIndex != null) {
+          rangeSelect(anchorIndex, next);
+        } else {
+          selectOnly(next);
+        }
+        scrollTileIntoView(next);
       } else if (e.key === "ArrowDown") {
         e.preventDefault();
-        setSelectedIndex((prev) => {
-          const next = prev == null ? 0 : Math.min(prev + cols, items.length - 1);
-          scrollTileIntoView(next);
-          autoLoadIfNeeded(next);
-          return next;
-        });
+        const next = focusIndex == null ? 0 : Math.min(focusIndex + cols, items.length - 1);
+        if (isShift && anchorIndex != null) {
+          rangeSelect(anchorIndex, next);
+        } else {
+          selectOnly(next);
+        }
+        scrollTileIntoView(next);
+        autoLoadIfNeeded(next);
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
-        setSelectedIndex((prev) => {
-          const next = prev == null ? 0 : Math.max(prev - cols, 0);
-          scrollTileIntoView(next);
-          return next;
-        });
+        const next = focusIndex == null ? 0 : Math.max(focusIndex - cols, 0);
+        if (isShift && anchorIndex != null) {
+          rangeSelect(anchorIndex, next);
+        } else {
+          selectOnly(next);
+        }
+        scrollTileIntoView(next);
       } else if (e.key === " ") {
         e.preventDefault();
-        if (selectedIndex != null) {
+        if (selectedIndices.size > 0) {
           setPreviewOpen((prev) => !prev);
         }
       }
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedIndex, previewOpen, items.length, showResumeModal, confirmDeleteRoot, setup?.isReady]);
+  }, [focusIndex, anchorIndex, selectedIndices, previewOpen, items.length, showResumeModal, confirmDeleteRoot, setup?.isReady]);
 
   function scrollTileIntoView(index: number) {
     const grid = gridRef.current;
@@ -393,12 +429,9 @@ export default function App() {
       setItems((prev) => [...prev, ...response.items]);
     } else {
       setItems(response.items);
-      // Clamp selection to new range or reset
-      setSelectedIndex((prev) => {
-        if (prev == null) return null;
-        if (response.items.length === 0) return null;
-        return prev < response.items.length ? prev : null;
-      });
+      setSelectedIndices(new Set());
+      setFocusIndex(null);
+      setAnchorIndex(null);
     }
   }
 
@@ -526,12 +559,44 @@ export default function App() {
     return activeScans.find((s) => s.rootId === rootId && s.status === "running");
   }
 
-  function onTileClick(idx: number) {
-    setSelectedIndex(idx);
+  function selectOnly(idx: number) {
+    setSelectedIndices(new Set([idx]));
+    setFocusIndex(idx);
+    setAnchorIndex(idx);
+  }
+
+  function toggleSelect(idx: number) {
+    setSelectedIndices(prev => {
+      const next = new Set(prev);
+      if (next.has(idx)) next.delete(idx); else next.add(idx);
+      return next;
+    });
+    setFocusIndex(idx);
+    setAnchorIndex(idx);
+  }
+
+  function rangeSelect(from: number, to: number) {
+    const lo = Math.min(from, to), hi = Math.max(from, to);
+    setSelectedIndices(prev => {
+      const next = new Set(prev);
+      for (let i = lo; i <= hi; i++) next.add(i);
+      return next;
+    });
+    setFocusIndex(to);
+  }
+
+  function onTileClick(idx: number, e: React.MouseEvent) {
+    if (e.ctrlKey || e.metaKey) {
+      toggleSelect(idx);
+    } else if (e.shiftKey && anchorIndex != null) {
+      rangeSelect(anchorIndex, idx);
+    } else {
+      selectOnly(idx);
+    }
   }
 
   function onTileDoubleClick(idx: number) {
-    setSelectedIndex(idx);
+    selectOnly(idx);
     setPreviewOpen(true);
   }
 
@@ -619,45 +684,66 @@ export default function App() {
       )}
 
       {/* ── Preview Modal ── */}
-      {previewItem && (
+      {previewItems.length > 0 && (
         <div className="modal-overlay preview-overlay" onClick={() => setPreviewOpen(false)} role="dialog" aria-modal="true">
           <div className="preview-modal" onClick={(e) => e.stopPropagation()}>
             <button className="preview-close" onClick={() => setPreviewOpen(false)} type="button" aria-label="Close preview">
               &times;
             </button>
-            {selectedIndex != null && selectedIndex > 0 && (
+            {/* Nav buttons only for single-select preview */}
+            {previewItems.length === 1 && singlePreviewIndex != null && singlePreviewIndex > 0 && (
               <button
                 className="preview-nav preview-nav-left"
-                onClick={() => { setSelectedIndex((prev) => Math.max(0, (prev ?? 1) - 1)); }}
+                onClick={() => {
+                  const next = Math.max(0, singlePreviewIndex - 1);
+                  selectOnly(next);
+                }}
                 type="button"
                 aria-label="Previous image"
               >&#8249;</button>
             )}
-            {selectedIndex != null && selectedIndex < items.length - 1 && (
+            {previewItems.length === 1 && singlePreviewIndex != null && singlePreviewIndex < items.length - 1 && (
               <button
                 className="preview-nav preview-nav-right"
                 onClick={() => {
-                  setSelectedIndex((prev) => {
-                    const next = Math.min(items.length - 1, (prev ?? 0) + 1);
-                    autoLoadIfNeeded(next);
-                    return next;
-                  });
+                  const next = Math.min(items.length - 1, singlePreviewIndex + 1);
+                  selectOnly(next);
+                  autoLoadIfNeeded(next);
                 }}
                 type="button"
                 aria-label="Next image"
               >&#8250;</button>
             )}
-            <div className="preview-image-wrap">
-              <img src={convertFileSrc(previewItem.absPath)} alt={previewItem.relPath} />
-            </div>
-            <div className="preview-info">
-              <h3 title={previewItem.relPath}>{previewItem.relPath}</h3>
-              <p className="preview-desc">{previewItem.description || "No description"}</p>
-              <div className="preview-meta">
-                <span className="badge">{previewItem.mediaType}</span>
-                <span>Confidence: {previewItem.confidence.toFixed(2)}</span>
-                <span>{(previewItem.sizeBytes / 1024).toFixed(0)} KB</span>
+            {/* Single image preview */}
+            {previewItems.length === 1 && (
+              <div className="preview-image-wrap">
+                <img src={convertFileSrc(previewItems[0].absPath)} alt={previewItems[0].relPath} />
               </div>
+            )}
+            {/* Collage preview (2-4 images) */}
+            {previewItems.length >= 2 && (
+              <div className="preview-collage" data-count={previewItems.length}>
+                {previewItems.map(item => (
+                  <div key={item.id} className="preview-collage-cell">
+                    <img src={convertFileSrc(item.absPath)} alt={item.relPath} />
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="preview-info">
+              {previewItems.length === 1 ? (
+                <>
+                  <h3 title={previewItems[0].relPath}>{previewItems[0].relPath}</h3>
+                  <p className="preview-desc">{previewItems[0].description || "No description"}</p>
+                  <div className="preview-meta">
+                    <span className="badge">{previewItems[0].mediaType}</span>
+                    <span>Confidence: {previewItems[0].confidence.toFixed(2)}</span>
+                    <span>{(previewItems[0].sizeBytes / 1024).toFixed(0)} KB</span>
+                  </div>
+                </>
+              ) : (
+                <h3>{selectedIndices.size} files selected</h3>
+              )}
             </div>
           </div>
         </div>
@@ -857,13 +943,12 @@ export default function App() {
             <div className="grid" role="list" ref={gridRef}>
               {items.map((item, idx) => {
                 const thumb = thumbnailSrc(item);
-                const isSelected = selectedIndex === idx;
                 return (
                   <article
                     key={item.id}
-                    className={`tile${isSelected ? " tile-selected" : ""}`}
+                    className={`tile${selectedIndices.has(idx) ? " tile-selected" : ""}${focusIndex === idx ? " tile-focused" : ""}`}
                     role="listitem"
-                    onClick={() => onTileClick(idx)}
+                    onClick={(e) => onTileClick(idx, e)}
                     onDoubleClick={() => onTileDoubleClick(idx)}
                   >
                     <div className="tile-thumb">
@@ -917,6 +1002,9 @@ export default function App() {
           <span>
             Scanning: {currentScan.processedFiles}/{currentScan.totalFiles} ({scanProgress.toFixed(0)}%)
           </span>
+        )}
+        {selectedIndices.size > 0 && (
+          <span>{selectedIndices.size} selected</span>
         )}
         <span className="spacer" />
         <span>Model: {runtime?.currentModel || "none"}</span>
