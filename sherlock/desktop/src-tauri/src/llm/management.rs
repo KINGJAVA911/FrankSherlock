@@ -1,9 +1,11 @@
 use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::error::AppResult;
 use crate::models::SetupDownloadStatus;
+
+const OLLAMA_BASE: &str = "http://localhost:11434";
 
 #[derive(Clone, Debug)]
 pub struct DownloadState {
@@ -33,105 +35,160 @@ impl DownloadState {
     }
 }
 
-/// List models installed locally via `ollama list`.
-pub fn list_installed_models() -> Option<Vec<String>> {
-    let output = Command::new("ollama").arg("list").output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(parse_ollama_table_output(&String::from_utf8_lossy(
-        &output.stdout,
-    )))
+fn http_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_recv_body(Some(Duration::from_secs(5)))
+        .timeout_send_body(Some(Duration::from_secs(5)))
+        .build()
+        .into()
 }
 
-/// List models currently loaded in Ollama via `ollama ps`.
+/// List models installed locally via Ollama HTTP API (`/api/tags`).
+pub fn list_installed_models() -> Option<Vec<String>> {
+    let agent = http_agent();
+    let mut resp = agent
+        .get(&format!("{OLLAMA_BASE}/api/tags"))
+        .call()
+        .ok()?;
+    let body: String = resp.body_mut().read_to_string().ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let models = parsed
+        .get("models")?
+        .as_array()?
+        .iter()
+        .filter_map(|m| {
+            m.get("name")
+                .or_else(|| m.get("model"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+        .collect();
+    Some(models)
+}
+
+/// List models currently loaded in Ollama via HTTP API (`/api/ps`).
 /// Returns (ollama_available, loaded_model_names).
 pub fn list_loaded_models() -> (bool, Vec<String>) {
-    match Command::new("ollama").arg("ps").output() {
-        Ok(output) if output.status.success() => {
-            let models = parse_ollama_table_output(&String::from_utf8_lossy(&output.stdout));
+    let agent = http_agent();
+    let resp = agent.get(&format!("{OLLAMA_BASE}/api/ps")).call();
+    match resp {
+        Ok(mut resp) => {
+            let body: String = match resp.body_mut().read_to_string() {
+                Ok(s) => s,
+                Err(_) => return (true, Vec::new()),
+            };
+            let parsed: serde_json::Value = match serde_json::from_str(&body) {
+                Ok(v) => v,
+                Err(_) => return (true, Vec::new()),
+            };
+            let models = parsed
+                .get("models")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| {
+                            m.get("name")
+                                .or_else(|| m.get("model"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             (true, models)
         }
-        _ => (false, Vec::new()),
+        Err(_) => (false, Vec::new()),
     }
 }
 
-/// Stop all currently loaded Ollama models.
+/// Unload all currently loaded Ollama models via HTTP API.
 pub fn cleanup_loaded_models() -> AppResult<()> {
-    let output = Command::new("ollama").arg("ps").output()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let models = parse_ollama_table_output(&text);
+    let (_, models) = list_loaded_models();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_recv_body(Some(Duration::from_secs(30)))
+        .timeout_send_body(Some(Duration::from_secs(10)))
+        .build()
+        .into();
 
     for model in &models {
-        let _ = Command::new("ollama").args(["stop", model]).status();
+        let payload = serde_json::json!({
+            "model": model,
+            "keep_alive": 0,
+        });
+        let _ = agent
+            .post(&format!("{OLLAMA_BASE}/api/generate"))
+            .send_json(&payload);
     }
 
     Ok(())
 }
 
-/// Run `ollama pull <model>`, streaming progress to a shared state.
+/// Pull a model via Ollama HTTP API (`/api/pull`), streaming progress.
 pub async fn run_model_download(setup_state: Arc<Mutex<DownloadState>>, model: String) {
-    let child = Command::new("ollama")
-        .args(["pull", &model])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_recv_body(None) // no timeout — downloads can take a long time
+        .timeout_send_body(Some(Duration::from_secs(30)))
+        .build()
+        .into();
 
-    let Ok(mut child) = child else {
+    let payload = serde_json::json!({
+        "name": &model,
+        "stream": true,
+    });
+
+    let resp = agent
+        .post(&format!("{OLLAMA_BASE}/api/pull"))
+        .send_json(&payload);
+
+    let Ok(resp) = resp else {
         let mut state = setup_state.lock().expect("setup download mutex poisoned");
         state.status = "failed".to_string();
-        state.message = "Could not spawn `ollama pull` process.".to_string();
+        state.message = "Could not connect to Ollama HTTP API for pull.".to_string();
         return;
     };
 
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+    let reader = BufReader::new(resp.into_body().into_reader());
+    for line in reader.lines().map_while(Result::ok) {
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
 
-    if let Some(out) = stdout {
-        let reader = BufReader::new(out);
-        for line in reader.lines().map_while(Result::ok) {
-            update_download_state_from_line(&setup_state, &model, &line);
+        let mut state = setup_state.lock().expect("setup download mutex poisoned");
+        state.model = Some(model.clone());
+        state.status = "running".to_string();
+
+        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) {
+            if let Some(status_text) = obj.get("status").and_then(|v| v.as_str()) {
+                state.message = status_text.to_string();
+            }
+            // Progress: {"status":"pulling ...","completed":123456,"total":789000}
+            let completed = obj.get("completed").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let total = obj.get("total").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            if total > 0.0 {
+                state.progress_pct = ((completed / total) * 100.0).clamp(0.0, 100.0) as f32;
+            }
+            // Check for error
+            if let Some(err) = obj.get("error").and_then(|v| v.as_str()) {
+                state.status = "failed".to_string();
+                state.message = err.to_string();
+                return;
+            }
+        } else {
+            // Fallback: try parsing percent from raw text
+            if let Some(pct) = parse_progress_percent(&line) {
+                state.progress_pct = pct;
+            }
+            state.message = line;
         }
     }
-    if let Some(err) = stderr {
-        let reader = BufReader::new(err);
-        for line in reader.lines().map_while(Result::ok) {
-            update_download_state_from_line(&setup_state, &model, &line);
-        }
-    }
 
-    match child.wait() {
-        Ok(status) if status.success() => {
-            let mut state = setup_state.lock().expect("setup download mutex poisoned");
-            state.status = "completed".to_string();
-            state.progress_pct = 100.0;
-            state.message = format!("Model {model} downloaded.");
-        }
-        Ok(status) => {
-            let mut state = setup_state.lock().expect("setup download mutex poisoned");
-            state.status = "failed".to_string();
-            state.message = format!("Model download failed with code {:?}", status.code());
-        }
-        Err(err) => {
-            let mut state = setup_state.lock().expect("setup download mutex poisoned");
-            state.status = "failed".to_string();
-            state.message = format!("Failed to wait for pull process: {err}");
-        }
-    }
-}
-
-fn update_download_state_from_line(
-    setup_state: &Arc<Mutex<DownloadState>>,
-    model: &str,
-    line: &str,
-) {
     let mut state = setup_state.lock().expect("setup download mutex poisoned");
-    state.model = Some(model.to_string());
-    state.status = "running".to_string();
-    if let Some(progress) = parse_progress_percent(line) {
-        state.progress_pct = progress;
+    if state.status == "running" {
+        state.status = "completed".to_string();
+        state.progress_pct = 100.0;
+        state.message = format!("Model {model} downloaded.");
     }
-    state.message = line.trim().to_string();
 }
 
 fn parse_progress_percent(line: &str) -> Option<f32> {
@@ -146,7 +203,9 @@ fn parse_progress_percent(line: &str) -> Option<f32> {
 }
 
 /// Parse the first whitespace-delimited column from each non-header line.
-/// Works for both `ollama ps` and `ollama list` output.
+/// Works for both `ollama ps` and `ollama list` CLI output.
+/// Kept for backward compatibility with tests.
+#[allow(dead_code)]
 fn parse_ollama_table_output(text: &str) -> Vec<String> {
     text.lines()
         .skip(1) // skip header row
@@ -209,5 +268,50 @@ mod tests {
         assert_eq!(view.status, "running");
         assert_eq!(view.model, Some("test:7b".to_string()));
         assert_eq!(view.progress_pct, 50.0);
+    }
+
+    #[test]
+    fn parses_api_tags_response() {
+        let json = r#"{"models":[{"name":"qwen2.5vl:7b","model":"qwen2.5vl:7b","size":5000000000}]}"#;
+        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+        let models: Vec<String> = parsed
+            .get("models")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .collect();
+        assert_eq!(models, vec!["qwen2.5vl:7b"]);
+    }
+
+    #[test]
+    fn parses_api_ps_response() {
+        let json = r#"{"models":[{"name":"qwen2.5vl:7b","model":"qwen2.5vl:7b"}]}"#;
+        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+        let models: Vec<String> = parsed
+            .get("models")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .collect();
+        assert_eq!(models, vec!["qwen2.5vl:7b"]);
+    }
+
+    #[test]
+    fn parses_empty_api_ps_response() {
+        let json = r#"{"models":[]}"#;
+        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+        let models: Vec<String> = parsed
+            .get("models")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .collect();
+        assert!(models.is_empty());
     }
 }
