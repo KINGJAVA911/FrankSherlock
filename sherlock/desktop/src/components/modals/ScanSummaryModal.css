@@ -1,0 +1,64 @@
+/* ── Summary modal ────────────────────────────────────────── */
+.summary-modal {
+  width: min(520px, 90%);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md);
+  padding: 16px;
+}
+
+.summary-modal h2 {
+  margin: 0 0 10px;
+  font-size: 1rem;
+}
+
+.summary-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+  margin-bottom: 12px;
+}
+
+.summary-table th {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-primary);
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.summary-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border-primary);
+  color: var(--text-primary);
+}
+
+.summary-table tfoot td {
+  border-bottom: none;
+  border-top: 1px solid var(--border-primary);
+  padding-top: 8px;
+}
+
+.summary-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.summary-actions button {
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  padding: 6px 14px;
+  font: inherit;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.summary-actions button:hover {
+  border-color: var(--border-focus);
+}

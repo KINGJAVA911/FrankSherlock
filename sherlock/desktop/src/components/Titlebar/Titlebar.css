@@ -1,0 +1,42 @@
+/* ── Custom titlebar ──────────────────────────────────────── */
+.titlebar {
+  background: var(--bg-titlebar);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+  position: relative;
+  -webkit-app-region: drag;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.titlebar-controls {
+  position: absolute;
+  right: 0;
+  top: 0;
+  display: flex;
+  height: 100%;
+  -webkit-app-region: no-drag;
+}
+
+.titlebar-controls button {
+  width: 46px;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+
+.titlebar-controls button:hover {
+  background: var(--bg-hover);
+}
+
+.titlebar-controls button.close:hover {
+  background: var(--danger);
+  color: #fff;
+}

@@ -1,0 +1,130 @@
+/* Frank Sherlock — VSCode-inspired theme with automatic light/dark */
+:root {
+  --bg-base: #1e1e1e;
+  --bg-surface: #252526;
+  --bg-sidebar: #252526;
+  --bg-titlebar: #323233;
+  --bg-statusbar: #007acc;
+  --bg-input: #3c3c3c;
+  --bg-hover: #2a2d2e;
+  --border-primary: #3c3c3c;
+  --border-focus: #007acc;
+  --text-primary: #cccccc;
+  --text-secondary: #969696;
+  --text-statusbar: #ffffff;
+  --accent: #007acc;
+  --danger: #f44747;
+  --success: #89d185;
+  --tile-bg: #2d2d2d;
+  --tile-border: #3c3c3c;
+  --radius-sm: 3px;
+  --radius-md: 6px;
+  --font-size-sm: 0.8125rem;
+  --font-size-base: 0.875rem;
+  color-scheme: dark;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", sans-serif;
+  font-size: var(--font-size-base);
+  color: var(--text-primary);
+  background: var(--bg-base);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg-base: #f3f3f3;
+    --bg-surface: #ffffff;
+    --bg-sidebar: #f3f3f3;
+    --bg-titlebar: #dddddd;
+    --bg-statusbar: #007acc;
+    --bg-input: #ffffff;
+    --bg-hover: #e8e8e8;
+    --border-primary: #cecece;
+    --border-focus: #007acc;
+    --text-primary: #333333;
+    --text-secondary: #616161;
+    --text-statusbar: #ffffff;
+    --tile-bg: #ffffff;
+    --tile-border: #e0e0e0;
+    color-scheme: light;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+}
+
+/* ── Base input/select ───────────────────────────────────── */
+input,
+select {
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-primary);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  padding: 5px 8px;
+  font: inherit;
+  font-size: var(--font-size-sm);
+}
+
+input:focus,
+select:focus {
+  outline: none;
+  border-color: var(--border-focus);
+}
+
+input:disabled,
+select:disabled {
+  opacity: 0.5;
+}
+
+/* ── Badge ────────────────────────────────────────────────── */
+.badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  border: 1px solid var(--border-primary);
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+}
+
+/* ── Modal overlays ───────────────────────────────────────── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(4px);
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+}
+
+/* ── Scrollbar styling ────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-primary);
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
+
+/* ── Responsive ───────────────────────────────────────────── */
+@media (max-width: 960px) {
+  .setup-status-grid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,0 +1,33 @@
+/* ── Shell grid ───────────────────────────────────────────── */
+.app-shell {
+  display: grid;
+  grid-template-rows: 32px 1fr 22px;
+  height: 100vh;
+}
+
+/* ── Read-only banner ─────────────────────────────────────── */
+.readonly-banner {
+  background: var(--danger);
+  color: #fff;
+  font-size: 0.75rem;
+  text-align: center;
+  padding: 3px 10px;
+  opacity: 0.85;
+}
+
+/* ── Main area ────────────────────────────────────────────── */
+.main-area {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  overflow: hidden;
+}
+
+@media (max-width: 960px) {
+  .main-area {
+    grid-template-columns: 0px 1fr;
+  }
+
+  .main-area .sidebar {
+    display: none;
+  }
+}
