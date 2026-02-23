@@ -46,10 +46,7 @@ fn http_agent() -> ureq::Agent {
 /// List models installed locally via Ollama HTTP API (`/api/tags`).
 pub fn list_installed_models() -> Option<Vec<String>> {
     let agent = http_agent();
-    let mut resp = agent
-        .get(&format!("{OLLAMA_BASE}/api/tags"))
-        .call()
-        .ok()?;
+    let mut resp = agent.get(&format!("{OLLAMA_BASE}/api/tags")).call().ok()?;
     let body: String = resp.body_mut().read_to_string().ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&body).ok()?;
     let models = parsed
@@ -272,7 +269,8 @@ mod tests {
 
     #[test]
     fn parses_api_tags_response() {
-        let json = r#"{"models":[{"name":"qwen2.5vl:7b","model":"qwen2.5vl:7b","size":5000000000}]}"#;
+        let json =
+            r#"{"models":[{"name":"qwen2.5vl:7b","model":"qwen2.5vl:7b","size":5000000000}]}"#;
         let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
         let models: Vec<String> = parsed
             .get("models")
@@ -280,7 +278,11 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .filter_map(|m| m.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .filter_map(|m| {
+                m.get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
         assert_eq!(models, vec!["qwen2.5vl:7b"]);
     }
@@ -295,7 +297,11 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .filter_map(|m| m.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .filter_map(|m| {
+                m.get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
         assert_eq!(models, vec!["qwen2.5vl:7b"]);
     }
@@ -310,7 +316,11 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .filter_map(|m| m.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .filter_map(|m| {
+                m.get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
         assert!(models.is_empty());
     }

@@ -889,13 +889,10 @@ pub fn classify_pdf(
                 extracted_text = ocr.text.clone();
 
                 let doc_fields = extract_document_fields(model, &ocr.text);
-                if let Some(kind) =
-                    doc_fields.get("document_kind").and_then(clean_nullable_str)
-                {
+                if let Some(kind) = doc_fields.get("document_kind").and_then(clean_nullable_str) {
                     description = format!("{description} [Doc: {kind}]");
                 }
-                if let Some(issuer) = doc_fields.get("issuer").and_then(clean_nullable_str)
-                {
+                if let Some(issuer) = doc_fields.get("issuer").and_then(clean_nullable_str) {
                     description = format!("{description} [Issuer: {issuer}]");
                 }
             }

@@ -58,11 +58,12 @@ pub fn extract_exif_details(path: &Path) -> ExifDetails {
     };
 
     let get_u32 = |tag: exif::Tag| -> Option<u32> {
-        exif.get_field(tag, exif::In::PRIMARY).and_then(|f| match &f.value {
-            exif::Value::Long(v) => v.first().copied(),
-            exif::Value::Short(v) => v.first().map(|x| *x as u32),
-            _ => f.display_value().to_string().trim().parse::<u32>().ok(),
-        })
+        exif.get_field(tag, exif::In::PRIMARY)
+            .and_then(|f| match &f.value {
+                exif::Value::Long(v) => v.first().copied(),
+                exif::Value::Short(v) => v.first().map(|x| *x as u32),
+                _ => f.display_value().to_string().trim().parse::<u32>().ok(),
+            })
     };
 
     // GPS extraction
@@ -72,7 +73,11 @@ pub fn extract_exif_details(path: &Path) -> ExifDetails {
     let gps_location = match (latitude, longitude) {
         (Some(lat), Some(lon)) => {
             let text = reverse_geocode(lat, lon);
-            if text.is_empty() { None } else { Some(text) }
+            if text.is_empty() {
+                None
+            } else {
+                Some(text)
+            }
         }
         _ => None,
     };

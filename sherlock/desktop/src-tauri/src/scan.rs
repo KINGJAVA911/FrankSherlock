@@ -100,7 +100,8 @@ fn run_scan_job_internal(
     }
 
     // Phase 1: Incremental discovery (metadata-only for unchanged files)
-    let probes = collect_image_probes_incremental(&root_path, &existing_by_path, &excluded_prefixes)?;
+    let probes =
+        collect_image_probes_incremental(&root_path, &existing_by_path, &excluded_prefixes)?;
     let total_files = probes.len() as u64;
     let start_index = resume_start_index(&probes, job.cursor_rel_path.as_deref());
 
@@ -150,9 +151,7 @@ fn run_scan_job_internal(
         }
 
         // Helper: check cancel flag after slow operations
-        let is_cancelled = || -> bool {
-            cancel_flag.map_or(false, |f| f.load(Ordering::Relaxed))
-        };
+        let is_cancelled = || -> bool { cancel_flag.map_or(false, |f| f.load(Ordering::Relaxed)) };
 
         match probe.status {
             FileStatus::Unchanged => {
@@ -169,7 +168,11 @@ fn run_scan_job_internal(
                         root_id: job.root_id,
                         root_path: root_path.display().to_string(),
                         scanned: processed_files,
-                        added, modified, moved, unchanged, deleted: 0,
+                        added,
+                        modified,
+                        moved,
+                        unchanged,
+                        deleted: 0,
                         elapsed_ms: started.elapsed().as_millis() as u64,
                     });
                 }
@@ -241,7 +244,11 @@ fn run_scan_job_internal(
                         root_id: job.root_id,
                         root_path: root_path.display().to_string(),
                         scanned: processed_files,
-                        added, modified, moved, unchanged, deleted: 0,
+                        added,
+                        modified,
+                        moved,
+                        unchanged,
+                        deleted: 0,
                         elapsed_ms: started.elapsed().as_millis() as u64,
                     });
                 }
@@ -645,8 +652,8 @@ mod tests {
             .map(|f| (f.rel_path.clone(), f.clone()))
             .collect();
 
-        let probes =
-            collect_image_probes_incremental(root_dir.path(), &existing_by_path, &[]).expect("probes");
+        let probes = collect_image_probes_incremental(root_dir.path(), &existing_by_path, &[])
+            .expect("probes");
         assert_eq!(probes.len(), 1);
         assert!(matches!(probes[0].status, FileStatus::Unchanged));
     }
@@ -687,8 +694,8 @@ mod tests {
         write_test_image(&img, 0xCC);
 
         let existing_by_path: HashMap<String, ExistingFile> = HashMap::new();
-        let probes =
-            collect_image_probes_incremental(root_dir.path(), &existing_by_path, &[]).expect("probes");
+        let probes = collect_image_probes_incremental(root_dir.path(), &existing_by_path, &[])
+            .expect("probes");
         assert_eq!(probes.len(), 1);
         assert!(matches!(probes[0].status, FileStatus::New));
     }
@@ -710,9 +717,8 @@ mod tests {
         let existing_by_path: HashMap<String, ExistingFile> = HashMap::new();
 
         // Without exclusions: both files found
-        let probes_all =
-            collect_image_probes_incremental(root_dir.path(), &existing_by_path, &[])
-                .expect("probes all");
+        let probes_all = collect_image_probes_incremental(root_dir.path(), &existing_by_path, &[])
+            .expect("probes all");
         assert_eq!(probes_all.len(), 2);
 
         // With child dir excluded: only parent file found
@@ -754,9 +760,8 @@ mod tests {
             .expect("write");
 
         let existing_by_path: HashMap<String, ExistingFile> = HashMap::new();
-        let probes =
-            collect_image_probes_incremental(root_dir.path(), &existing_by_path, &[])
-                .expect("probes");
+        let probes = collect_image_probes_incremental(root_dir.path(), &existing_by_path, &[])
+            .expect("probes");
 
         let filenames: Vec<&str> = probes.iter().map(|p| p.filename.as_str()).collect();
         assert!(filenames.contains(&"photo.jpg"));

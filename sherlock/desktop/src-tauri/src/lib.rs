@@ -293,8 +293,8 @@ fn cancel_scan(job_id: i64, state: State<'_, AppState>) -> Result<bool, String> 
 fn remove_root(root_id: i64, state: State<'_, AppState>) -> Result<PurgeResult, String> {
     require_writable(state.inner())?;
     // If this root has a parent root, reassign files back instead of deleting
-    if let Some(_parent_id) = db::reassign_to_parent_root(&state.paths.db_file, root_id)
-        .map_err(|e| e.to_string())?
+    if let Some(_parent_id) =
+        db::reassign_to_parent_root(&state.paths.db_file, root_id).map_err(|e| e.to_string())?
     {
         // Files reassigned to parent, root + jobs already deleted by reassign_to_parent_root
         return Ok(PurgeResult {
@@ -720,9 +720,7 @@ fn resolve_pdfium_lib(app_handle: &tauri::AppHandle) -> std::path::PathBuf {
     if cfg!(target_os = "macos") {
         if let Ok(resource_dir) = app_handle.path().resource_dir() {
             // resource_dir points to Contents/Resources/; Frameworks is a sibling.
-            let frameworks_dir = resource_dir
-                .parent()
-                .map(|p| p.join("Frameworks"));
+            let frameworks_dir = resource_dir.parent().map(|p| p.join("Frameworks"));
             if let Some(fw) = frameworks_dir {
                 if fw.join(lib_name).exists() {
                     return fw;

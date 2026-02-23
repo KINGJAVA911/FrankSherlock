@@ -280,7 +280,11 @@ fn upsert_root_conn(conn: &Connection, root_path: &str) -> AppResult<i64> {
 
 /// After inserting a new child root, reassign files from a parent root whose
 /// `rel_path` falls under the child's subtree.
-pub fn adopt_child_files(db_path: &Path, child_root_id: i64, child_root_path: &str) -> AppResult<u64> {
+pub fn adopt_child_files(
+    db_path: &Path,
+    child_root_id: i64,
+    child_root_path: &str,
+) -> AppResult<u64> {
     let conn = open_conn(db_path)?;
     let mut all_roots_stmt = conn.prepare("SELECT id, root_path FROM roots")?;
     let all_roots: Vec<(i64, String)> = all_roots_stmt
@@ -312,9 +316,8 @@ pub fn adopt_child_files(db_path: &Path, child_root_id: i64, child_root_path: &s
 
         // Find files in parent root under the child's subtree
         let like_pattern = format!("{}/%", sub_prefix);
-        let mut file_stmt = tx.prepare(
-            "SELECT id, rel_path FROM files WHERE root_id = ?1 AND rel_path LIKE ?2"
-        )?;
+        let mut file_stmt =
+            tx.prepare("SELECT id, rel_path FROM files WHERE root_id = ?1 AND rel_path LIKE ?2")?;
         let file_rows: Vec<(i64, String)> = file_stmt
             .query_map(params![parent_id, like_pattern], |row| {
                 Ok((row.get(0)?, row.get(1)?))
@@ -873,9 +876,9 @@ pub fn reassign_to_parent_root(db_path: &Path, child_root_id: i64) -> AppResult<
         .collect::<Result<Vec<_>, _>>()?;
     drop(roots_stmt);
 
-    let parent = all_roots.iter().find(|(id, rp)| {
-        *id != child_root_id && child.starts_with(std::path::Path::new(rp))
-    });
+    let parent = all_roots
+        .iter()
+        .find(|(id, rp)| *id != child_root_id && child.starts_with(std::path::Path::new(rp)));
 
     let (parent_id, parent_path) = match parent {
         Some((id, rp)) => (*id, rp.clone()),
@@ -893,9 +896,7 @@ pub fn reassign_to_parent_root(db_path: &Path, child_root_id: i64) -> AppResult<
     // Reassign all files from child root to parent root
     let mut files_stmt = tx.prepare("SELECT id, rel_path FROM files WHERE root_id = ?1")?;
     let file_rows: Vec<(i64, String)> = files_stmt
-        .query_map(params![child_root_id], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?
+        .query_map(params![child_root_id], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<Result<Vec<_>, _>>()?;
     drop(files_stmt);
 
@@ -928,7 +929,10 @@ pub fn reassign_to_parent_root(db_path: &Path, child_root_id: i64) -> AppResult<
     }
 
     // Delete the child root record and its scan jobs (but NOT the files — they've been moved)
-    tx.execute("DELETE FROM scan_jobs WHERE root_id = ?1", params![child_root_id])?;
+    tx.execute(
+        "DELETE FROM scan_jobs WHERE root_id = ?1",
+        params![child_root_id],
+    )?;
     tx.execute("DELETE FROM roots WHERE id = ?1", params![child_root_id])?;
 
     tx.commit()?;
@@ -1739,9 +1743,8 @@ pub fn delete_smart_folder(db_path: &Path, folder_id: i64) -> AppResult<()> {
 
 pub fn list_smart_folders(db_path: &Path) -> AppResult<Vec<SmartFolder>> {
     let conn = open_conn(db_path)?;
-    let mut stmt = conn.prepare(
-        "SELECT id, name, query, created_at FROM smart_folders ORDER BY sort_order, id",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT id, name, query, created_at FROM smart_folders ORDER BY sort_order, id")?;
     let rows = stmt.query_map([], |row| {
         Ok(SmartFolder {
             id: row.get(0)?,
@@ -3072,11 +3075,8 @@ mod tests {
             &sample_record(root_id, "Screenshots/a.jpg", "fp-ss-a"),
         )
         .expect("upsert");
-        upsert_file_record(
-            &db_path,
-            &sample_record(root_id, "Photos/b.jpg", "fp-ph-b"),
-        )
-        .expect("upsert");
+        upsert_file_record(&db_path, &sample_record(root_id, "Photos/b.jpg", "fp-ph-b"))
+            .expect("upsert");
 
         let req = SearchRequest {
             query: "subdir:Screenshots".to_string(),
@@ -3149,11 +3149,8 @@ mod tests {
         let child_id = upsert_root(&db_path, "/home/Pictures/Photos").expect("child");
 
         // File in child root
-        upsert_file_record(
-            &db_path,
-            &sample_record(child_id, "vacation.jpg", "fp-vac"),
-        )
-        .expect("upsert");
+        upsert_file_record(&db_path, &sample_record(child_id, "vacation.jpg", "fp-vac"))
+            .expect("upsert");
 
         // Remove child root — files should go back to parent
         let result = reassign_to_parent_root(&db_path, child_id).expect("reassign");
