@@ -1,3 +1,4 @@
+#[cfg(not(target_os = "macos"))]
 use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]

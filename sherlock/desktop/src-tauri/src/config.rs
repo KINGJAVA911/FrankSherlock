@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn expand_and_canonicalize_resolves_dot() {
-        let cwd = std::env::current_dir().expect("cwd");
+        let cwd = dunce::canonicalize(".").expect("cwd");
         let result = expand_and_canonicalize(".").expect("dot");
         assert_eq!(result, cwd);
     }
@@ -205,14 +205,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let with_slash = format!("{}/", dir.path().display());
         let result = expand_and_canonicalize(&with_slash).expect("trailing slash");
-        assert_eq!(result, dir.path().canonicalize().expect("canon"));
+        assert_eq!(result, dunce::canonicalize(dir.path()).expect("canon"));
     }
 
     #[test]
     fn expand_and_canonicalize_tilde() {
         if let Some(home) = dirs::home_dir() {
             let result = expand_and_canonicalize("~").expect("tilde");
-            assert_eq!(result, home.canonicalize().expect("canon"));
+            assert_eq!(result, dunce::canonicalize(&home).expect("canon"));
         }
     }
 
@@ -223,7 +223,7 @@ mod tests {
             if home.is_dir() {
                 // Just test that ~/. resolves to home
                 let result = expand_and_canonicalize("~/.").expect("tilde dot");
-                assert_eq!(result, home.canonicalize().expect("canon"));
+                assert_eq!(result, dunce::canonicalize(&home).expect("canon"));
             }
         }
     }
