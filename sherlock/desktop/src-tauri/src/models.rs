@@ -96,6 +96,8 @@ pub struct ParsedQuery {
     pub parser_confidence: f32,
     #[serde(default)]
     pub album_name: Option<String>,
+    #[serde(default)]
+    pub subdir: Option<String>,
 }
 
 impl ParsedQuery {
@@ -110,6 +112,7 @@ impl ParsedQuery {
             root_hints: Vec::new(),
             parser_confidence: 0.2,
             album_name: None,
+            subdir: None,
         }
     }
 }

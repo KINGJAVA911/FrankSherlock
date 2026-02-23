@@ -278,6 +278,84 @@ fn upsert_root_conn(conn: &Connection, root_path: &str) -> AppResult<i64> {
     Ok(conn.last_insert_rowid())
 }
 
+/// After inserting a new child root, reassign files from a parent root whose
+/// `rel_path` falls under the child's subtree.
+pub fn adopt_child_files(db_path: &Path, child_root_id: i64, child_root_path: &str) -> AppResult<u64> {
+    let conn = open_conn(db_path)?;
+    let mut all_roots_stmt = conn.prepare("SELECT id, root_path FROM roots")?;
+    let all_roots: Vec<(i64, String)> = all_roots_stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(all_roots_stmt);
+
+    let child = std::path::Path::new(child_root_path);
+    let mut moved = 0u64;
+
+    for (parent_id, parent_path) in &all_roots {
+        if *parent_id == child_root_id {
+            continue;
+        }
+        let parent = std::path::Path::new(parent_path);
+        // child must be under parent (e.g. parent=/home/Pictures, child=/home/Pictures/Photos)
+        if !child.starts_with(parent) {
+            continue;
+        }
+        let sub_prefix = child
+            .strip_prefix(parent)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if sub_prefix.is_empty() {
+            continue;
+        }
+
+        let tx = conn.unchecked_transaction()?;
+
+        // Find files in parent root under the child's subtree
+        let like_pattern = format!("{}/%", sub_prefix);
+        let mut file_stmt = tx.prepare(
+            "SELECT id, rel_path FROM files WHERE root_id = ?1 AND rel_path LIKE ?2"
+        )?;
+        let file_rows: Vec<(i64, String)> = file_stmt
+            .query_map(params![parent_id, like_pattern], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(file_stmt);
+
+        // Also match files directly at the prefix level (rel_path == "Photos/file.jpg" matches "Photos/%")
+        let prefix_with_slash = format!("{}/", sub_prefix);
+        for (file_id, old_rel_path) in &file_rows {
+            let new_rel_path = old_rel_path
+                .strip_prefix(&prefix_with_slash)
+                .unwrap_or(old_rel_path)
+                .to_string();
+
+            // Update file record
+            tx.execute(
+                "UPDATE files SET root_id = ?1, rel_path = ?2 WHERE id = ?3",
+                params![child_root_id, new_rel_path, file_id],
+            )?;
+
+            // Update FTS: delete old and re-insert with new rel_path
+            tx.execute("DELETE FROM files_fts WHERE rowid = ?1", params![file_id])?;
+            let fts_row: (String, String, String, String) = tx.query_row(
+                "SELECT filename, description, extracted_text, canonical_mentions FROM files WHERE id = ?1",
+                params![file_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+            tx.execute(
+                "INSERT INTO files_fts(rowid, filename, rel_path, description, extracted_text, canonical_mentions) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![file_id, fts_row.0, new_rel_path, fts_row.1, fts_row.2, fts_row.3],
+            )?;
+            moved += 1;
+        }
+
+        tx.commit()?;
+    }
+    Ok(moved)
+}
+
 pub fn touch_root_scan(db_path: &Path, root_id: i64) -> AppResult<()> {
     let conn = open_conn(db_path)?;
     conn.execute(
@@ -739,6 +817,17 @@ fn refresh_fts(conn: &Connection, file_id: i64) -> AppResult<()> {
 // Root management
 // ---------------------------------------------------------------------------
 
+pub fn list_root_paths(db_path: &Path) -> AppResult<Vec<(i64, String)>> {
+    let conn = open_conn(db_path)?;
+    let mut stmt = conn.prepare("SELECT id, root_path FROM roots")?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 pub fn list_roots(db_path: &Path) -> AppResult<Vec<RootInfo>> {
     let conn = open_conn(db_path)?;
     let mut stmt = conn.prepare(
@@ -761,6 +850,89 @@ pub fn list_roots(db_path: &Path) -> AppResult<Vec<RootInfo>> {
         out.push(row?);
     }
     Ok(out)
+}
+
+/// When removing a child root that has a parent root, reassign files back to
+/// the parent instead of deleting them. Returns Some(parent_id) if a parent was
+/// found and files were reassigned, None if no parent exists.
+pub fn reassign_to_parent_root(db_path: &Path, child_root_id: i64) -> AppResult<Option<i64>> {
+    let conn = open_conn(db_path)?;
+
+    // Look up the child's root_path
+    let child_path: String = conn.query_row(
+        "SELECT root_path FROM roots WHERE id = ?1",
+        params![child_root_id],
+        |r| r.get(0),
+    )?;
+    let child = std::path::Path::new(&child_path);
+
+    // Find a parent root (child is under parent)
+    let mut roots_stmt = conn.prepare("SELECT id, root_path FROM roots")?;
+    let all_roots: Vec<(i64, String)> = roots_stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(roots_stmt);
+
+    let parent = all_roots.iter().find(|(id, rp)| {
+        *id != child_root_id && child.starts_with(std::path::Path::new(rp))
+    });
+
+    let (parent_id, parent_path) = match parent {
+        Some((id, rp)) => (*id, rp.clone()),
+        None => return Ok(None),
+    };
+
+    // Compute the prefix to prepend when moving files back to parent
+    let sub_prefix = child
+        .strip_prefix(std::path::Path::new(&parent_path))
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let tx = conn.unchecked_transaction()?;
+
+    // Reassign all files from child root to parent root
+    let mut files_stmt = tx.prepare("SELECT id, rel_path FROM files WHERE root_id = ?1")?;
+    let file_rows: Vec<(i64, String)> = files_stmt
+        .query_map(params![child_root_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(files_stmt);
+
+    let prefix_with_slash = if sub_prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", sub_prefix)
+    };
+
+    for (file_id, old_rel_path) in &file_rows {
+        let new_rel_path = format!("{}{}", prefix_with_slash, old_rel_path);
+
+        tx.execute(
+            "UPDATE files SET root_id = ?1, rel_path = ?2 WHERE id = ?3",
+            params![parent_id, new_rel_path, file_id],
+        )?;
+
+        // Update FTS
+        tx.execute("DELETE FROM files_fts WHERE rowid = ?1", params![file_id])?;
+        let fts_row: (String, String, String, String) = tx.query_row(
+            "SELECT filename, description, extracted_text, canonical_mentions FROM files WHERE id = ?1",
+            params![file_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        tx.execute(
+            "INSERT INTO files_fts(rowid, filename, rel_path, description, extracted_text, canonical_mentions) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![file_id, fts_row.0, new_rel_path, fts_row.1, fts_row.2, fts_row.3],
+        )?;
+    }
+
+    // Delete the child root record and its scan jobs (but NOT the files — they've been moved)
+    tx.execute("DELETE FROM scan_jobs WHERE root_id = ?1", params![child_root_id])?;
+    tx.execute("DELETE FROM roots WHERE id = ?1", params![child_root_id])?;
+
+    tx.commit()?;
+    Ok(Some(parent_id))
 }
 
 pub fn purge_root(db_path: &Path, root_id: i64) -> AppResult<PurgeResult> {
@@ -1130,6 +1302,11 @@ fn search_images_normalized(
         bind_values.push(Value::Text(album_name.clone()));
     }
 
+    if let Some(ref dir) = parsed.subdir {
+        where_clauses.push("f.rel_path LIKE ?".to_string());
+        bind_values.push(Value::Text(format!("{}/%", dir)));
+    }
+
     let media_types = normalize_media_types(&request.media_types);
     if !media_types.is_empty() {
         let placeholders = vec!["?"; media_types.len()].join(", ");
@@ -1293,20 +1470,54 @@ fn parse_date_end_ns(value: &str) -> Option<i64> {
 }
 
 fn to_fts_query(input: &str) -> String {
-    let tokens = input
-        .split_whitespace()
-        .map(sanitize_fts_token)
-        .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>();
-    if tokens.is_empty() {
-        return String::new();
+    let mut parts: Vec<String> = Vec::new();
+    let mut remaining = input;
+
+    // Extract "quoted phrases" first, collect remaining unquoted text
+    let mut unquoted_chunks: Vec<&str> = Vec::new();
+    loop {
+        if let Some(start) = remaining.find('"') {
+            // Text before the opening quote
+            let before = &remaining[..start];
+            if !before.trim().is_empty() {
+                unquoted_chunks.push(before);
+            }
+            let after_open = &remaining[start + 1..];
+            if let Some(end) = after_open.find('"') {
+                // Sanitize words inside phrase, keep as FTS5 phrase (no *)
+                let phrase_words: Vec<String> = after_open[..end]
+                    .split_whitespace()
+                    .map(sanitize_fts_token)
+                    .filter(|t| !t.is_empty())
+                    .collect();
+                if !phrase_words.is_empty() {
+                    parts.push(format!("\"{}\"", phrase_words.join(" ")));
+                }
+                remaining = &after_open[end + 1..];
+            } else {
+                // No closing quote — treat rest as unquoted
+                unquoted_chunks.push(after_open);
+                break;
+            }
+        } else {
+            if !remaining.trim().is_empty() {
+                unquoted_chunks.push(remaining);
+            }
+            break;
+        }
     }
-    // Use OR to keep broad natural-language queries from over-filtering sparse metadata.
-    tokens
-        .into_iter()
-        .map(|token| format!("{token}*"))
-        .collect::<Vec<_>>()
-        .join(" OR ")
+
+    // Process unquoted words: sanitize + append * (implicit AND via space)
+    for chunk in unquoted_chunks {
+        for word in chunk.split_whitespace() {
+            let token = sanitize_fts_token(word);
+            if !token.is_empty() {
+                parts.push(format!("{token}*"));
+            }
+        }
+    }
+
+    parts.join(" ")
 }
 
 fn sanitize_fts_token(token: &str) -> String {
@@ -1684,7 +1895,8 @@ mod tests {
             abs_path: "/tmp/demo/images/ranma.jpg".to_string(),
             filename: "ranma.jpg".to_string(),
             media_type: "other".to_string(),
-            description: "Character poster".to_string(),
+            // Description mentions "anime" so AND search for "anime ranma" can match
+            description: "anime character poster".to_string(),
             extracted_text: String::new(),
             canonical_mentions: String::new(),
             confidence: 0.0,
@@ -1697,7 +1909,10 @@ mod tests {
         };
         upsert_file_record(&db_path, &rec).expect("upsert");
 
-        // Query parser infers media_type=anime, which would otherwise hide this file.
+        // Query parser infers media_type=anime, which would otherwise hide this
+        // file (media_type is "other"). Fallback relaxes media_type filter.
+        // With AND semantics, both "anime*" and "ranma*" must match somewhere in
+        // the FTS fields — description has "anime" and filename has "ranma".
         let req = SearchRequest {
             query: "anime ranma".to_string(),
             limit: Some(20),
@@ -2744,5 +2959,224 @@ mod tests {
         assert_eq!(folders[0].id, f3.id);
         assert_eq!(folders[1].id, f1.id);
         assert_eq!(folders[2].id, f2.id);
+    }
+
+    // -----------------------------------------------------------------------
+    // FTS AND semantics + quoted phrase tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fts_query_and_semantics() {
+        // Unquoted words → implicit AND with prefix *
+        assert_eq!(to_fts_query("white shirt"), "white* shirt*");
+    }
+
+    #[test]
+    fn fts_query_quoted_phrase() {
+        // Quoted phrase → exact FTS5 phrase, no *
+        assert_eq!(to_fts_query("\"white shirt\""), "\"white shirt\"");
+    }
+
+    #[test]
+    fn fts_query_mixed() {
+        // Mixed: unquoted words + quoted phrase
+        assert_eq!(
+            to_fts_query("anime \"white shirt\" beach"),
+            "\"white shirt\" anime* beach*"
+        );
+    }
+
+    #[test]
+    fn fts_query_empty() {
+        assert_eq!(to_fts_query(""), "");
+        assert_eq!(to_fts_query("   "), "");
+    }
+
+    #[test]
+    fn fts_query_single_word() {
+        assert_eq!(to_fts_query("ranma"), "ranma*");
+    }
+
+    #[test]
+    fn fts_and_search_returns_intersection() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/demo").expect("root");
+
+        // File A: has both "white" and "shirt"
+        let mut rec_a = sample_record(root_id, "a.jpg", "fp-a");
+        rec_a.description = "anime girl with white shirt on the beach".to_string();
+        upsert_file_record(&db_path, &rec_a).expect("upsert a");
+
+        // File B: has "white" but not "shirt"
+        let mut rec_b = sample_record(root_id, "b.jpg", "fp-b");
+        rec_b.description = "white cat on a wall".to_string();
+        upsert_file_record(&db_path, &rec_b).expect("upsert b");
+
+        // AND semantics: "white shirt" should only match file A
+        let req = SearchRequest {
+            query: "white shirt".to_string(),
+            ..SearchRequest::default()
+        };
+        let res = search_images(&db_path, &req).expect("search");
+        assert_eq!(res.total, 1);
+        assert_eq!(res.items[0].rel_path, "a.jpg");
+    }
+
+    // -----------------------------------------------------------------------
+    // subdir: filter tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn subdir_filter_narrows_results() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/demo").expect("root");
+
+        upsert_file_record(
+            &db_path,
+            &sample_record(root_id, "Screenshots/a.jpg", "fp-ss-a"),
+        )
+        .expect("upsert");
+        upsert_file_record(
+            &db_path,
+            &sample_record(root_id, "Photos/b.jpg", "fp-ph-b"),
+        )
+        .expect("upsert");
+
+        let req = SearchRequest {
+            query: "subdir:Screenshots".to_string(),
+            ..SearchRequest::default()
+        };
+        let res = search_images(&db_path, &req).expect("search");
+        assert_eq!(res.total, 1);
+        assert_eq!(res.items[0].rel_path, "Screenshots/a.jpg");
+    }
+
+    // -----------------------------------------------------------------------
+    // Root overlap: adopt_child_files / reassign_to_parent_root tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn adopt_child_files_moves_from_parent() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+
+        // Parent root: /home/Pictures
+        let parent_id = upsert_root(&db_path, "/home/Pictures").expect("parent");
+        // File under parent at "Photos/vacation.jpg"
+        upsert_file_record(
+            &db_path,
+            &sample_record(parent_id, "Photos/vacation.jpg", "fp-vac"),
+        )
+        .expect("upsert");
+        // File NOT under child subtree
+        upsert_file_record(
+            &db_path,
+            &sample_record(parent_id, "Screenshots/ss.jpg", "fp-ss"),
+        )
+        .expect("upsert");
+
+        // Add child root: /home/Pictures/Photos
+        let child_id = upsert_root(&db_path, "/home/Pictures/Photos").expect("child");
+        let moved = adopt_child_files(&db_path, child_id, "/home/Pictures/Photos").expect("adopt");
+        assert_eq!(moved, 1);
+
+        // Verify the file was reassigned
+        let conn = open_conn(&db_path).expect("open");
+        let (rid, rp): (i64, String) = conn
+            .query_row(
+                "SELECT root_id, rel_path FROM files WHERE fingerprint = 'fp-vac'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("query");
+        assert_eq!(rid, child_id);
+        assert_eq!(rp, "vacation.jpg");
+
+        // The other file stays with parent
+        let (rid2, rp2): (i64, String) = conn
+            .query_row(
+                "SELECT root_id, rel_path FROM files WHERE fingerprint = 'fp-ss'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("query");
+        assert_eq!(rid2, parent_id);
+        assert_eq!(rp2, "Screenshots/ss.jpg");
+    }
+
+    #[test]
+    fn reassign_to_parent_on_remove() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+
+        let parent_id = upsert_root(&db_path, "/home/Pictures").expect("parent");
+        let child_id = upsert_root(&db_path, "/home/Pictures/Photos").expect("child");
+
+        // File in child root
+        upsert_file_record(
+            &db_path,
+            &sample_record(child_id, "vacation.jpg", "fp-vac"),
+        )
+        .expect("upsert");
+
+        // Remove child root — files should go back to parent
+        let result = reassign_to_parent_root(&db_path, child_id).expect("reassign");
+        assert_eq!(result, Some(parent_id));
+
+        // Verify file is now under parent with prefix
+        let conn = open_conn(&db_path).expect("open");
+        let (rid, rp): (i64, String) = conn
+            .query_row(
+                "SELECT root_id, rel_path FROM files WHERE fingerprint = 'fp-vac'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("query");
+        assert_eq!(rid, parent_id);
+        assert_eq!(rp, "Photos/vacation.jpg");
+
+        // Child root should be deleted
+        let root_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM roots WHERE id = ?1",
+                params![child_id],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(root_count, 0);
+    }
+
+    #[test]
+    fn purge_root_still_works_without_parent() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+
+        let root_id = upsert_root(&db_path, "/home/standalone").expect("root");
+        upsert_file_record(&db_path, &sample_record(root_id, "a.jpg", "fp-a")).expect("upsert");
+
+        // No parent root — reassign_to_parent returns None
+        let result = reassign_to_parent_root(&db_path, root_id).expect("reassign");
+        assert_eq!(result, None);
+
+        // Normal purge works
+        let purge = purge_root(&db_path, root_id).expect("purge");
+        assert_eq!(purge.files_removed, 1);
+    }
+
+    #[test]
+    fn list_root_paths_returns_all() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+
+        upsert_root(&db_path, "/home/a").expect("a");
+        upsert_root(&db_path, "/home/b").expect("b");
+
+        let paths = list_root_paths(&db_path).expect("list");
+        assert_eq!(paths.len(), 2);
+        let path_strs: Vec<&str> = paths.iter().map(|(_, p)| p.as_str()).collect();
+        assert!(path_strs.contains(&"/home/a"));
+        assert!(path_strs.contains(&"/home/b"));
     }
 }

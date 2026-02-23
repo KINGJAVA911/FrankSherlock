@@ -21,6 +21,19 @@ pub fn parse_query(raw_query: &str) -> ParsedQuery {
         raw.to_string()
     };
 
+    // Extract subdir:path or subdir:"path with spaces" prefix
+    let mut subdir: Option<String> = None;
+    let subdir_re = Regex::new(r#"(?i)\bsubdir:(?:"([^"]+)"|(\S+))"#).expect("valid regex");
+    let working_query = if let Some(cap) = subdir_re.captures(&working_query) {
+        subdir = cap
+            .get(1)
+            .or_else(|| cap.get(2))
+            .map(|m| m.as_str().to_string());
+        subdir_re.replace(&working_query, "").trim().to_string()
+    } else {
+        working_query
+    };
+
     let lower = working_query.to_lowercase();
     let mut media_types = Vec::new();
     let mut root_hints = Vec::new();
@@ -80,6 +93,9 @@ pub fn parse_query(raw_query: &str) -> ParsedQuery {
     if album_name.is_some() {
         score += 0.3;
     }
+    if subdir.is_some() {
+        score += 0.2;
+    }
 
     ParsedQuery {
         raw_query: raw.to_string(),
@@ -91,6 +107,7 @@ pub fn parse_query(raw_query: &str) -> ParsedQuery {
         root_hints,
         parser_confidence: score.clamp(0.0, 1.0),
         album_name,
+        subdir,
     }
 }
 
@@ -294,5 +311,37 @@ mod tests {
         assert!(parsed.media_types.contains(&"photo".to_string()));
         assert_eq!(parsed.date_from.as_deref(), Some("2022-01-01"));
         assert_eq!(parsed.root_hints, vec!["Camera".to_string()]);
+    }
+
+    // -----------------------------------------------------------------------
+    // subdir: prefix tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parses_subdir_simple() {
+        let parsed = parse_query("subdir:Screenshots beach");
+        assert_eq!(parsed.subdir.as_deref(), Some("Screenshots"));
+        assert_eq!(parsed.query_text, "beach");
+    }
+
+    #[test]
+    fn parses_subdir_quoted() {
+        let parsed = parse_query("subdir:\"Photos/2024\" sunset");
+        assert_eq!(parsed.subdir.as_deref(), Some("Photos/2024"));
+        assert_eq!(parsed.query_text, "sunset");
+    }
+
+    #[test]
+    fn subdir_only_query() {
+        let parsed = parse_query("subdir:Downloads");
+        assert_eq!(parsed.subdir.as_deref(), Some("Downloads"));
+        assert_eq!(parsed.query_text, "");
+    }
+
+    #[test]
+    fn no_subdir_prefix() {
+        let parsed = parse_query("beach sunset");
+        assert!(parsed.subdir.is_none());
+        assert_eq!(parsed.query_text, "beach sunset");
     }
 }

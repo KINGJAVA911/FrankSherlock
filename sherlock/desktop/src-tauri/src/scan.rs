@@ -12,6 +12,8 @@ use crate::classify;
 use crate::config::canonical_root_path;
 use crate::db;
 use crate::error::AppResult;
+use std::path::PathBuf;
+
 use crate::models::{
     ClassificationResult, ExistingFile, FileRecordUpsert, ScanContext, ScanJobStatus, ScanSummary,
 };
@@ -65,6 +67,20 @@ fn run_scan_job_internal(
     let job = db::get_scan_job_state(db_path, job_id)?;
     let root_path = canonical_root_path(&job.root_path)?;
 
+    // Compute child roots to exclude during walkdir
+    let all_roots = db::list_root_paths(db_path).unwrap_or_default();
+    let excluded_prefixes: Vec<PathBuf> = all_roots
+        .iter()
+        .filter_map(|(_id, rp)| {
+            let rp_path = PathBuf::from(rp);
+            if rp_path.starts_with(&root_path) && rp_path != root_path {
+                Some(rp_path)
+            } else {
+                None
+            }
+        })
+        .collect();
+
     // Phase 1: Load existing DB records
     let existing = db::load_existing_files(db_path, job.root_id)?;
     let existing_by_path: HashMap<String, ExistingFile> = existing
@@ -80,7 +96,7 @@ fn run_scan_job_internal(
     }
 
     // Phase 1: Incremental discovery (metadata-only for unchanged files)
-    let probes = collect_image_probes_incremental(&root_path, &existing_by_path)?;
+    let probes = collect_image_probes_incremental(&root_path, &existing_by_path, &excluded_prefixes)?;
     let total_files = probes.len() as u64;
     let start_index = resume_start_index(&probes, job.cursor_rel_path.as_deref());
 
@@ -363,6 +379,7 @@ fn resume_start_index(probes: &[FileProbe], cursor_rel_path: Option<&str>) -> us
 fn collect_image_probes_incremental(
     root: &Path,
     existing_by_path: &HashMap<String, ExistingFile>,
+    excluded_prefixes: &[PathBuf],
 ) -> AppResult<Vec<FileProbe>> {
     let mut probes = Vec::new();
     for entry in WalkDir::new(root)
@@ -374,6 +391,10 @@ fn collect_image_probes_incremental(
             continue;
         }
         let path = entry.path();
+        // Skip files belonging to child roots
+        if excluded_prefixes.iter().any(|p| path.starts_with(p)) {
+            continue;
+        }
         if !is_supported_file(path) {
             continue;
         }
@@ -608,7 +629,7 @@ mod tests {
             .collect();
 
         let probes =
-            collect_image_probes_incremental(root_dir.path(), &existing_by_path).expect("probes");
+            collect_image_probes_incremental(root_dir.path(), &existing_by_path, &[]).expect("probes");
         assert_eq!(probes.len(), 1);
         assert!(matches!(probes[0].status, FileStatus::Unchanged));
     }
@@ -651,8 +672,45 @@ mod tests {
 
         let existing_by_path: HashMap<String, ExistingFile> = HashMap::new();
         let probes =
-            collect_image_probes_incremental(root_dir.path(), &existing_by_path).expect("probes");
+            collect_image_probes_incremental(root_dir.path(), &existing_by_path, &[]).expect("probes");
         assert_eq!(probes.len(), 1);
         assert!(matches!(probes[0].status, FileStatus::New));
+    }
+
+    #[test]
+    fn excluded_prefixes_skips_child_root_files() {
+        let root_dir = tempfile::tempdir().expect("tempdir");
+
+        // Create files in parent root
+        let parent_img = root_dir.path().join("parent.jpg");
+        File::create(&parent_img)
+            .expect("create")
+            .write_all(b"parent-data")
+            .expect("write");
+
+        // Create child root subdir with a file
+        let child_dir = root_dir.path().join("Photos");
+        std::fs::create_dir_all(&child_dir).expect("mkdir");
+        let child_img = child_dir.join("child.jpg");
+        File::create(&child_img)
+            .expect("create")
+            .write_all(b"child-data")
+            .expect("write");
+
+        let existing_by_path: HashMap<String, ExistingFile> = HashMap::new();
+
+        // Without exclusions: both files found
+        let probes_all =
+            collect_image_probes_incremental(root_dir.path(), &existing_by_path, &[])
+                .expect("probes all");
+        assert_eq!(probes_all.len(), 2);
+
+        // With child dir excluded: only parent file found
+        let excluded = vec![child_dir.clone()];
+        let probes_filtered =
+            collect_image_probes_incremental(root_dir.path(), &existing_by_path, &excluded)
+                .expect("probes filtered");
+        assert_eq!(probes_filtered.len(), 1);
+        assert_eq!(probes_filtered[0].filename, "parent.jpg");
     }
 }

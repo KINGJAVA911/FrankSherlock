@@ -250,6 +250,8 @@ fn start_scan(
 
     let job = scan::start_or_resume_scan_job(&state.paths.db_file, &root_path)
         .map_err(|e| e.to_string())?;
+    // If this root is a child of an existing parent root, adopt files from parent
+    let _ = db::adopt_child_files(&state.paths.db_file, job.root_id, &job.root_path);
     let app_state = state.inner().clone();
     spawn_scan_worker_if_needed(app_state, &app_handle, job.id);
     db::get_scan_job(&state.paths.db_file, job.id)
@@ -290,6 +292,17 @@ fn cancel_scan(job_id: i64, state: State<'_, AppState>) -> Result<bool, String> 
 #[tauri::command]
 fn remove_root(root_id: i64, state: State<'_, AppState>) -> Result<PurgeResult, String> {
     require_writable(state.inner())?;
+    // If this root has a parent root, reassign files back instead of deleting
+    if let Some(_parent_id) = db::reassign_to_parent_root(&state.paths.db_file, root_id)
+        .map_err(|e| e.to_string())?
+    {
+        // Files reassigned to parent, root + jobs already deleted by reassign_to_parent_root
+        return Ok(PurgeResult {
+            files_removed: 0,
+            jobs_removed: 0,
+            thumbs_cleaned: 0,
+        });
+    }
     db::purge_root(&state.paths.db_file, root_id).map_err(|e| e.to_string())
 }
 
