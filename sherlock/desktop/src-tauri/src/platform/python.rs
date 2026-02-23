@@ -249,7 +249,10 @@ pub async fn run_venv_provision(
         return;
     };
 
-    // Stream output lines for progress feedback
+    // Stream output lines for progress feedback.
+    // surya-ocr pulls many transitive deps, so pip can produce 200+ lines.
+    // We use an asymptotic curve: progress = 10 + 85 * (1 - e^(-lines/120))
+    // This approaches 95% smoothly without hard-capping at 90%.
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let mut line_count = 0u32;
@@ -259,8 +262,8 @@ pub async fn run_venv_provision(
         for line in reader.lines().map_while(Result::ok) {
             line_count += 1;
             let mut s = state.lock().expect("venv provision mutex poisoned");
-            // Heuristic progress: pip install typically has 20-80 lines of output
-            s.progress_pct = (10.0 + (line_count as f32 * 1.5).min(80.0)).min(90.0);
+            let frac = 1.0 - (-(line_count as f32) / 120.0).exp();
+            s.progress_pct = 10.0 + 85.0 * frac;
             s.message = line.trim().to_string();
         }
     }
@@ -269,13 +272,18 @@ pub async fn run_venv_provision(
         for line in reader.lines().map_while(Result::ok) {
             line_count += 1;
             let mut s = state.lock().expect("venv provision mutex poisoned");
-            s.progress_pct = (10.0 + (line_count as f32 * 1.5).min(80.0)).min(90.0);
+            let frac = 1.0 - (-(line_count as f32) / 120.0).exp();
+            s.progress_pct = 10.0 + 85.0 * frac;
             s.message = line.trim().to_string();
         }
     }
 
     match child.wait() {
-        Ok(status) if status.success() => {}
+        Ok(status) if status.success() => {
+            let mut s = state.lock().expect("venv provision mutex poisoned");
+            s.progress_pct = 95.0;
+            s.message = "pip install completed, verifying...".to_string();
+        }
         Ok(status) => {
             let mut s = state.lock().expect("venv provision mutex poisoned");
             s.status = "failed".to_string();

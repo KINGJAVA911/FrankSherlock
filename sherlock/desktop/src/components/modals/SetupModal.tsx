@@ -61,8 +61,8 @@ export default function SetupModal({ setup, onRecheck, onDownload, onSetupOcr, o
         {setup.venvProvision.status !== "idle" && (
           <>
             <div className="progress-wrap">
-              <progress value={setup.venvProvision.progressPct} max={100} />
-              <span>{setup.venvProvision.progressPct.toFixed(1)}%</span>
+              <progress value={setup.venvProvision.status === "completed" ? 100 : setup.venvProvision.progressPct} max={100} />
+              <span>{(setup.venvProvision.status === "completed" ? 100 : setup.venvProvision.progressPct).toFixed(1)}%</span>
             </div>
             <p className="setup-download-text">{setup.venvProvision.message}</p>
           </>
