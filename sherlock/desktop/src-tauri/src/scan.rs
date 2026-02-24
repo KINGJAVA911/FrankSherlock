@@ -172,7 +172,6 @@ fn run_scan_job_internal(
     let mut unchanged = job.unchanged;
     let mut used_moved_ids = HashSet::new();
     let mut last_cursor: Option<String> = job.cursor_rel_path.clone();
-    let mut unchanged_batch: Vec<String> = Vec::new();
     const UNCHANGED_BATCH_SIZE: usize = 200;
     db::checkpoint_scan_job(
         db_path,
@@ -197,8 +196,45 @@ fn run_scan_job_internal(
         log::info!("Scan job {}: starting processing from beginning", job_id);
     }
 
-    // Phase 2: Processing loop
+    // Flush all unchanged files upfront so the UI can show previously-known
+    // files immediately while classification works through new/modified ones.
+    let flush_start = Instant::now();
+    let unchanged_paths: Vec<&str> = probes
+        .iter()
+        .skip(start_index)
+        .filter(|p| matches!(p.status, FileStatus::Unchanged))
+        .map(|p| p.rel_path.as_str())
+        .collect();
+    let unchanged_total = unchanged_paths.len() as u64;
+    for batch in unchanged_paths.chunks(UNCHANGED_BATCH_SIZE) {
+        db::touch_file_scan_markers_batch(db_path, job.root_id, batch, job.scan_marker)?;
+    }
+    unchanged += unchanged_total;
+    processed_files += unchanged_total;
+    log::info!(
+        "Scan job {}: flushed {} unchanged markers in {}ms",
+        job_id,
+        unchanged_total,
+        flush_start.elapsed().as_millis(),
+    );
+    db::checkpoint_scan_job(
+        db_path,
+        job_id,
+        total_files,
+        processed_files,
+        last_cursor.as_deref(),
+        added,
+        modified,
+        moved,
+        unchanged,
+    )?;
+
+    // Phase 2: Processing loop — only new and modified files remain
     for (i, probe) in probes.iter().enumerate().skip(start_index) {
+        if matches!(probe.status, FileStatus::Unchanged) {
+            continue; // already flushed above
+        }
+
         if let Some(flag) = cancel_flag {
             if flag.load(Ordering::Relaxed) {
                 db::cancel_scan_job(db_path, job_id)?;
@@ -226,20 +262,7 @@ fn run_scan_job_internal(
         let is_cancelled = || -> bool { cancel_flag.is_some_and(|f| f.load(Ordering::Relaxed)) };
 
         match probe.status {
-            FileStatus::Unchanged => {
-                unchanged_batch.push(probe.rel_path.clone());
-                unchanged += 1;
-                if unchanged_batch.len() >= UNCHANGED_BATCH_SIZE {
-                    let refs: Vec<&str> = unchanged_batch.iter().map(|s| s.as_str()).collect();
-                    db::touch_file_scan_markers_batch(
-                        db_path,
-                        job.root_id,
-                        &refs,
-                        job.scan_marker,
-                    )?;
-                    unchanged_batch.clear();
-                }
-            }
+            FileStatus::Unchanged => unreachable!("filtered above"),
             FileStatus::Modified => {
                 // Re-classify and regenerate thumbnail
                 let classification = classify_and_thumbnail(ctx, probe, job.root_id);
@@ -363,12 +386,7 @@ fn run_scan_job_internal(
         )?;
     }
 
-    // Flush remaining unchanged batch
-    if !unchanged_batch.is_empty() {
-        let refs: Vec<&str> = unchanged_batch.iter().map(|s| s.as_str()).collect();
-        db::touch_file_scan_markers_batch(db_path, job.root_id, &refs, job.scan_marker)?;
-        unchanged_batch.clear();
-    }
+    // (Unchanged files were already flushed before the processing loop.)
 
     if max_files_for_test.is_some() {
         return Ok(ScanSummary {
