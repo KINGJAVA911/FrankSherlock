@@ -178,11 +178,16 @@ fn run_scan_job_internal(
         unchanged,
     )?;
 
-    log::info!(
-        "Scan job {}: starting processing from index {}",
-        job_id,
-        start_index
-    );
+    if start_index > 0 {
+        log::info!(
+            "Scan job {}: resuming processing from index {} (cursor: {:?})",
+            job_id,
+            start_index,
+            job.cursor_rel_path
+        );
+    } else {
+        log::info!("Scan job {}: starting processing from beginning", job_id);
+    }
 
     // Phase 2: Processing loop
     for (i, probe) in probes.iter().enumerate().skip(start_index) {

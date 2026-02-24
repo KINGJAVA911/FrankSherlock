@@ -454,11 +454,11 @@ pub fn create_or_resume_scan_job(db_path: &Path, root_path: &str) -> AppResult<S
         .ok();
 
     if let Some(job_id) = maybe_job_id {
+        // Keep cursor_rel_path and counters so phase 2 can resume from the
+        // last checkpoint instead of re-processing every file.
         tx.execute(
             "UPDATE scan_jobs
              SET status = 'running', error_text = NULL,
-                 cursor_rel_path = NULL, processed_files = 0,
-                 added = 0, modified = 0, moved = 0, unchanged = 0,
                  phase = 'discovering', discovered_files = 0,
                  updated_at = ?2
              WHERE id = ?1",
@@ -2696,6 +2696,14 @@ mod tests {
         let resumed = create_or_resume_scan_job(&db_path, "/tmp/demo").expect("resume");
         assert_eq!(resumed.id, job.id);
         assert_eq!(resumed.status, "running");
+        // Cursor and counters must survive resume so phase 2 can skip
+        // already-processed files instead of re-classifying everything.
+        assert_eq!(resumed.processed_files, 7);
+        assert_eq!(
+            resumed.cursor_rel_path,
+            Some("a.jpg".to_string()),
+            "cursor must be preserved on resume"
+        );
 
         let changed = recover_incomplete_scan_jobs(&db_path).expect("recover");
         assert!(changed >= 1);
