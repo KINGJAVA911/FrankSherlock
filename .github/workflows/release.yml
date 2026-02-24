@@ -95,6 +95,40 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           security list-keychain -d user -s $KEYCHAIN_PATH
 
+      - name: Load release notes
+        id: release-notes
+        shell: bash
+        run: |
+          TAG="${{ github.ref_name }}"
+          NOTES_FILE="releases/${TAG}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            BODY=$(cat "$NOTES_FILE")
+          else
+            BODY="Release ${TAG}"
+          fi
+          # Append install instructions
+          BODY="${BODY}
+
+          ## Install
+
+          | Platform | File |
+          |----------|------|
+          | Linux (AppImage) | \`frank-sherlock_*_amd64.AppImage\` |
+          | macOS (Apple Silicon) | \`frank-sherlock_*_aarch64.dmg\` |
+          | Windows | \`frank-sherlock_*_x64-setup.exe\` |
+
+          ### Prerequisites
+          - [Ollama](https://ollama.com) must be installed and running locally
+          - The app will prompt you to download the required model (\`qwen2.5vl:7b\`) on first launch
+
+          ### Windows first launch
+          The installer is not code-signed. Windows SmartScreen may show a warning — click **More info** then **Run anyway** to proceed. You only need to do this once.
+          "
+          # Set multiline output
+          echo "body<<RELEASE_EOF" >> "$GITHUB_OUTPUT"
+          echo "$BODY" >> "$GITHUB_OUTPUT"
+          echo "RELEASE_EOF" >> "$GITHUB_OUTPUT"
+
       # macOS: Sign bundled dylibs before Tauri copies them into the app bundle
       - name: Sign PDFium library for notarization
         if: runner.os == 'macOS'
@@ -120,29 +154,7 @@ jobs:
           projectPath: sherlock/desktop
           tagName: ${{ github.ref_name }}
           releaseName: "Frank Sherlock ${{ github.ref_name }}"
-          releaseBody: |
-            See the [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
-
-            ## Install
-
-            | Platform | File |
-            |----------|------|
-            | Linux (AppImage) | `frank-sherlock_*_amd64.AppImage` |
-            | macOS (Apple Silicon) | `frank-sherlock_*_aarch64.dmg` |
-            | Windows | `frank-sherlock_*_x64-setup.exe` |
-
-            ### Prerequisites
-            - [Ollama](https://ollama.com) must be installed and running locally
-            - The app will prompt you to download the required model (`qwen2.5vl:7b`) on first launch
-
-            ### Windows first launch
-            The installer is not code-signed. Windows SmartScreen may show a warning — click **"More info"** then **"Run anyway"** to proceed. You only need to do this once.
-
-            ### Verify Linux AppImage (optional)
-            ```bash
-            gpg --recv-keys YOUR_KEY_FINGERPRINT
-            gpg --verify frank-sherlock_*_amd64.AppImage.asc
-            ```
+          releaseBody: ${{ steps.release-notes.outputs.body }}
           releaseDraft: true
           prerelease: false
           args: --target ${{ matrix.rust_target }}
