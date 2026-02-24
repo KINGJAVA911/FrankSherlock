@@ -598,6 +598,7 @@ export default function App() {
     const q = album.name.includes(" ") ? `album:"${album.name}"` : `album:${album.name}`;
     setQuery(q);
     setActiveSmartFolderId(null);
+    setDuplicatesMode(false);
   }
 
   async function handleDeleteAlbum(album: Album) {
@@ -653,6 +654,7 @@ export default function App() {
   function handleSelectSmartFolder(folder: SmartFolder) {
     setQuery(folder.query);
     setActiveSmartFolderId(folder.id);
+    setDuplicatesMode(false);
   }
 
   async function handleDeleteSmartFolder(folder: SmartFolder) {
@@ -846,7 +848,7 @@ export default function App() {
           smartFolders={smartFolders}
           activeAlbumName={activeAlbumName}
           activeSmartFolderId={activeSmartFolderId}
-          onSelectRoot={setSelectedRootId}
+          onSelectRoot={(id) => { setSelectedRootId(id); setDuplicatesMode(false); }}
           onDeleteRoot={(root) => setConfirmDeleteRoot(root)}
           onRescanRoot={(root) => scanManager.onRescanRoot(root, setup, readOnly)}
           onCopyRootPath={(root) => {
