@@ -11,6 +11,7 @@ export function formatEta(seconds: number): string {
 }
 
 export function computeEta(scan: ScanJobStatus): string | null {
+  if (scan.phase === "discovering") return null;
   if (scan.processedFiles <= 0 || scan.totalFiles <= 0) return null;
   const remaining = scan.totalFiles - scan.processedFiles;
   if (remaining <= 0) return null;

@@ -74,6 +74,7 @@ export default function RootCard({ root, isSelected, scan, readOnly, onSelect, o
       className={`root-card${isSelected ? " selected" : ""}`}
       onClick={onSelect}
       onContextMenu={handleContextMenu}
+      title={root.rootPath}
       role="button"
       tabIndex={0}
       onKeyDown={(e) => {
@@ -105,7 +106,16 @@ export default function RootCard({ root, isSelected, scan, readOnly, onSelect, o
       <div className="root-card-meta">
         <span>{root.fileCount.toLocaleString()} files</span>
       </div>
-      {scan?.status === "running" && (
+      {scan?.status === "running" && scan.phase === "discovering" && (
+        <div className="root-card-scan">
+          <div className="root-card-discovery-bar" />
+          <span>Discovering files... ({scan.discoveredFiles.toLocaleString()} found)</span>
+          {!readOnly && onCancelScan && (
+            <button type="button" className="root-card-scan-btn" onClick={(e) => { e.stopPropagation(); onCancelScan(); }}>Pause</button>
+          )}
+        </div>
+      )}
+      {scan?.status === "running" && scan.phase !== "discovering" && (
         <div className="root-card-scan">
           <progress value={progress} max={100} />
           <span>{scan.processedFiles}/{scan.totalFiles}</span>

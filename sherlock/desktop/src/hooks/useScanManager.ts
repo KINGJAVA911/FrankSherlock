@@ -33,7 +33,9 @@ function scansChanged(prev: ScanJobStatus[], next: ScanJobStatus[]): boolean {
       prev[i].totalFiles !== next[i].totalFiles ||
       prev[i].added !== next[i].added ||
       prev[i].modified !== next[i].modified ||
-      prev[i].moved !== next[i].moved
+      prev[i].moved !== next[i].moved ||
+      prev[i].phase !== next[i].phase ||
+      prev[i].discoveredFiles !== next[i].discoveredFiles
     ) return true;
   }
   return false;

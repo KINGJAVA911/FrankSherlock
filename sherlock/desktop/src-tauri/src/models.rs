@@ -170,6 +170,8 @@ pub struct ScanJobStatus {
     pub updated_at: i64,
     pub started_at: i64,
     pub completed_at: Option<i64>,
+    pub phase: String,
+    pub discovered_files: u64,
 }
 
 #[derive(Debug, Clone)]

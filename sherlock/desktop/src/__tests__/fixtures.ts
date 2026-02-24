@@ -38,6 +38,8 @@ export const mockRunningScan: ScanJobStatus = {
   deleted: 0,
   startedAt: 0,
   updatedAt: 0,
+  phase: "processing",
+  discoveredFiles: 0,
 };
 
 export const mockAlbum: Album = {

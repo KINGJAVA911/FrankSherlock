@@ -66,6 +66,8 @@ export type ScanJobStatus = {
   updatedAt: number;
   startedAt: number;
   completedAt?: number | null;
+  phase: "discovering" | "processing" | "cleanup";
+  discoveredFiles: number;
 };
 
 export type DbStats = {

@@ -223,6 +223,13 @@ fn run_migrations(conn: &mut Connection) -> AppResult<()> {
             CREATE INDEX IF NOT EXISTS idx_files_dhash ON files(dhash);
             "#,
         ),
+        // Migration 7: Discovery phase tracking for scan jobs
+        M::up(
+            r#"
+            ALTER TABLE scan_jobs ADD COLUMN phase TEXT NOT NULL DEFAULT 'processing';
+            ALTER TABLE scan_jobs ADD COLUMN discovered_files INTEGER NOT NULL DEFAULT 0;
+            "#,
+        ),
     ]);
 
     migrations
@@ -400,6 +407,7 @@ pub fn create_or_resume_scan_job(db_path: &Path, root_path: &str) -> AppResult<S
              SET status = 'running', error_text = NULL,
                  cursor_rel_path = NULL, processed_files = 0,
                  added = 0, modified = 0, moved = 0, unchanged = 0,
+                 phase = 'discovering', discovered_files = 0,
                  updated_at = ?2
              WHERE id = ?1",
             params![job_id, now],
@@ -414,11 +422,13 @@ pub fn create_or_resume_scan_job(db_path: &Path, root_path: &str) -> AppResult<S
         "INSERT INTO scan_jobs(
             root_id, root_path, status, scan_marker,
             total_files, processed_files, added, modified, moved, unchanged, deleted,
-            cursor_rel_path, error_text, started_at, updated_at, completed_at
+            cursor_rel_path, error_text, started_at, updated_at, completed_at,
+            phase, discovered_files
          ) VALUES (
             ?1, ?2, 'running', ?3,
             0, 0, 0, 0, 0, 0, 0,
-            NULL, NULL, ?4, ?4, NULL
+            NULL, NULL, ?4, ?4, NULL,
+            'discovering', 0
          )",
         params![root_id, root_path, scan_marker, now],
     )?;
@@ -434,7 +444,7 @@ pub fn list_resumable_scan_jobs(db_path: &Path) -> AppResult<Vec<ScanJobStatus>>
         "SELECT
             id, root_id, root_path, status, scan_marker, total_files, processed_files,
             added, modified, moved, unchanged, deleted, cursor_rel_path, error_text,
-            updated_at, started_at, completed_at
+            updated_at, started_at, completed_at, phase, discovered_files
          FROM scan_jobs
          WHERE status IN ('running', 'pending', 'interrupted')
          ORDER BY updated_at DESC",
@@ -453,7 +463,7 @@ pub fn get_scan_job(db_path: &Path, job_id: i64) -> AppResult<Option<ScanJobStat
         "SELECT
             id, root_id, root_path, status, scan_marker, total_files, processed_files,
             added, modified, moved, unchanged, deleted, cursor_rel_path, error_text,
-            updated_at, started_at, completed_at
+            updated_at, started_at, completed_at, phase, discovered_files
          FROM scan_jobs
          WHERE id = ?1",
     )?;
@@ -506,6 +516,7 @@ pub fn checkpoint_scan_job(
     conn.execute(
         "UPDATE scan_jobs
          SET status = 'running',
+             phase = 'processing',
              total_files = ?2,
              processed_files = ?3,
              cursor_rel_path = ?4,
@@ -579,6 +590,20 @@ pub fn cancel_scan_job(db_path: &Path, job_id: i64) -> AppResult<()> {
     Ok(())
 }
 
+pub fn update_discovery_progress(
+    db_path: &Path,
+    job_id: i64,
+    discovered_files: u64,
+) -> AppResult<()> {
+    let conn = open_conn(db_path)?;
+    conn.execute(
+        "UPDATE scan_jobs SET phase = 'discovering', discovered_files = ?2, updated_at = ?3
+         WHERE id = ?1",
+        params![job_id, discovered_files as i64, now_epoch_secs()],
+    )?;
+    Ok(())
+}
+
 pub fn fail_scan_job(db_path: &Path, job_id: i64, error_text: &str) -> AppResult<()> {
     let conn = open_conn(db_path)?;
     conn.execute(
@@ -618,6 +643,7 @@ pub fn load_existing_files(db_path: &Path, root_id: i64) -> AppResult<Vec<Existi
     Ok(out)
 }
 
+#[cfg(test)]
 pub fn touch_file_scan_marker(
     db_path: &Path,
     root_id: i64,
@@ -629,6 +655,29 @@ pub fn touch_file_scan_marker(
         "UPDATE files SET scan_marker = ?1, updated_at = ?2 WHERE root_id = ?3 AND rel_path = ?4",
         params![scan_marker, now_epoch_secs(), root_id, rel_path],
     )?;
+    Ok(())
+}
+
+pub fn touch_file_scan_markers_batch(
+    db_path: &Path,
+    root_id: i64,
+    rel_paths: &[&str],
+    scan_marker: i64,
+) -> AppResult<()> {
+    if rel_paths.is_empty() {
+        return Ok(());
+    }
+    let conn = open_conn(db_path)?;
+    let tx = conn.unchecked_transaction()?;
+    let mut stmt = tx.prepare(
+        "UPDATE files SET scan_marker = ?1, updated_at = ?2 WHERE root_id = ?3 AND rel_path = ?4",
+    )?;
+    let now = now_epoch_secs();
+    for rp in rel_paths {
+        stmt.execute(params![scan_marker, now, root_id, rp])?;
+    }
+    drop(stmt);
+    tx.commit()?;
     Ok(())
 }
 
@@ -1482,6 +1531,8 @@ fn scan_job_from_row(row: &Row<'_>) -> rusqlite::Result<ScanJobStatus> {
         updated_at: row.get(14)?,
         started_at: row.get(15)?,
         completed_at: row.get(16)?,
+        phase: row.get(17)?,
+        discovered_files: row.get::<_, i64>(18)? as u64,
     })
 }
 
@@ -2878,11 +2929,11 @@ mod tests {
         init_database(&db_path).expect("init");
 
         let conn = open_conn(&db_path).expect("open");
-        // Verify user_version is set (7 migrations applied → version 7)
+        // Verify user_version is set (8 migrations applied → version 8)
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .expect("user_version");
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
 
         // Verify all tables exist
         let tables: Vec<String> = {
@@ -2923,8 +2974,8 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .expect("user_version");
-        // We have 7 migrations (indices 0..6), so user_version should be 7
-        assert_eq!(version, 7);
+        // We have 8 migrations (indices 0..7), so user_version should be 8
+        assert_eq!(version, 8);
     }
 
     #[test]

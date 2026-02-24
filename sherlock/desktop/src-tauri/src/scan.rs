@@ -71,6 +71,12 @@ fn run_scan_job_internal(
     let job = db::get_scan_job_state(db_path, job_id)?;
     let root_path = canonical_root_path(&job.root_path)?;
 
+    log::info!(
+        "Scan job {}: starting discovery for {}",
+        job_id,
+        root_path.display()
+    );
+
     // Compute child roots to exclude during walkdir
     let all_roots = db::list_root_paths(db_path).unwrap_or_default();
     let excluded_prefixes: Vec<PathBuf> = all_roots
@@ -100,10 +106,37 @@ fn run_scan_job_internal(
     }
 
     // Phase 1: Incremental discovery (metadata-only for unchanged files)
+    let discovery_start = Instant::now();
     let probes =
-        collect_image_probes_incremental(&root_path, &existing_by_path, &excluded_prefixes)?;
+        collect_image_probes_incremental(&root_path, &existing_by_path, &excluded_prefixes, db_path, job_id, cancel_flag)?;
+
+    // If cancelled during discovery, bail out
+    if cancel_flag.map_or(false, |f| f.load(Ordering::Relaxed)) {
+        db::cancel_scan_job(db_path, job_id)?;
+        return Ok(ScanSummary {
+            root_id: job.root_id,
+            root_path: root_path.display().to_string(),
+            scanned: 0,
+            added: 0,
+            modified: 0,
+            moved: 0,
+            unchanged: 0,
+            deleted: 0,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+        });
+    }
+
     let total_files = probes.len() as u64;
     let start_index = resume_start_index(&probes, job.cursor_rel_path.as_deref());
+
+    let new_count = probes.iter().filter(|p| matches!(p.status, FileStatus::New)).count();
+    let mod_count = probes.iter().filter(|p| matches!(p.status, FileStatus::Modified)).count();
+    let unch_count = probes.iter().filter(|p| matches!(p.status, FileStatus::Unchanged)).count();
+    log::info!(
+        "Scan job {}: discovery complete — {} files ({} new, {} modified, {} unchanged) in {:.1}s",
+        job_id, total_files, new_count, mod_count, unch_count,
+        discovery_start.elapsed().as_secs_f64()
+    );
 
     let mut processed_files = job.processed_files.max(start_index as u64);
     let mut added = job.added;
@@ -112,6 +145,9 @@ fn run_scan_job_internal(
     let mut unchanged = job.unchanged;
     let mut used_moved_ids = HashSet::new();
     let mut last_cursor: Option<String> = job.cursor_rel_path.clone();
+    let mut unchanged_batch: Vec<String> = Vec::new();
+    const UNCHANGED_BATCH_SIZE: usize = 200;
+    const CHECKPOINT_INTERVAL: u64 = 50;
 
     db::checkpoint_scan_job(
         db_path,
@@ -124,6 +160,11 @@ fn run_scan_job_internal(
         moved,
         unchanged,
     )?;
+
+    log::info!(
+        "Scan job {}: starting processing from index {}",
+        job_id, start_index
+    );
 
     // Phase 2: Processing loop
     for (i, probe) in probes.iter().enumerate().skip(start_index) {
@@ -155,9 +196,13 @@ fn run_scan_job_internal(
 
         match probe.status {
             FileStatus::Unchanged => {
-                // Only update scan marker, skip everything else
-                db::touch_file_scan_marker(db_path, job.root_id, &probe.rel_path, job.scan_marker)?;
+                unchanged_batch.push(probe.rel_path.clone());
                 unchanged += 1;
+                if unchanged_batch.len() >= UNCHANGED_BATCH_SIZE {
+                    let refs: Vec<&str> = unchanged_batch.iter().map(|s| s.as_str()).collect();
+                    db::touch_file_scan_markers_batch(db_path, job.root_id, &refs, job.scan_marker)?;
+                    unchanged_batch.clear();
+                }
             }
             FileStatus::Modified => {
                 // Re-classify and regenerate thumbnail
@@ -226,17 +271,19 @@ fn run_scan_job_internal(
 
                         processed_files += 1;
                         last_cursor = Some(probe.rel_path.clone());
-                        db::checkpoint_scan_job(
-                            db_path,
-                            job_id,
-                            total_files,
-                            processed_files,
-                            last_cursor.as_deref(),
-                            added,
-                            modified,
-                            moved,
-                            unchanged,
-                        )?;
+                        if processed_files % CHECKPOINT_INTERVAL == 0 {
+                            db::checkpoint_scan_job(
+                                db_path,
+                                job_id,
+                                total_files,
+                                processed_files,
+                                last_cursor.as_deref(),
+                                added,
+                                modified,
+                                moved,
+                                unchanged,
+                            )?;
+                        }
                         continue;
                     }
                 }
@@ -268,17 +315,26 @@ fn run_scan_job_internal(
 
         processed_files += 1;
         last_cursor = Some(probe.rel_path.clone());
-        db::checkpoint_scan_job(
-            db_path,
-            job_id,
-            total_files,
-            processed_files,
-            last_cursor.as_deref(),
-            added,
-            modified,
-            moved,
-            unchanged,
-        )?;
+        if processed_files % CHECKPOINT_INTERVAL == 0 || i == probes.len() - 1 {
+            db::checkpoint_scan_job(
+                db_path,
+                job_id,
+                total_files,
+                processed_files,
+                last_cursor.as_deref(),
+                added,
+                modified,
+                moved,
+                unchanged,
+            )?;
+        }
+    }
+
+    // Flush remaining unchanged batch
+    if !unchanged_batch.is_empty() {
+        let refs: Vec<&str> = unchanged_batch.iter().map(|s| s.as_str()).collect();
+        db::touch_file_scan_markers_batch(db_path, job.root_id, &refs, job.scan_marker)?;
+        unchanged_batch.clear();
     }
 
     if max_files_for_test.is_some() {
@@ -294,6 +350,8 @@ fn run_scan_job_internal(
             elapsed_ms: started.elapsed().as_millis() as u64,
         });
     }
+
+    log::info!("Scan job {}: processing complete, starting cleanup", job_id);
 
     // Phase 3: Cleanup deleted files
     let deleted_at_before = db::now_epoch_secs_pub();
@@ -403,21 +461,35 @@ fn collect_image_probes_incremental(
     root: &Path,
     existing_by_path: &HashMap<String, ExistingFile>,
     excluded_prefixes: &[PathBuf],
+    db_path: &Path,
+    job_id: i64,
+    cancel_flag: Option<&AtomicBool>,
 ) -> AppResult<Vec<FileProbe>> {
     let mut probes = Vec::new();
+    let mut discovered: u64 = 0;
     for entry in WalkDir::new(root)
         .follow_links(false)
         .into_iter()
+        .filter_entry(|e| {
+            // Skip child root subtrees before descending
+            if e.file_type().is_dir() && e.path() != root {
+                return !excluded_prefixes.iter().any(|p| e.path().starts_with(p));
+            }
+            true
+        })
         .filter_map(|entry| entry.ok())
     {
+        // Check cancel flag during discovery
+        if let Some(flag) = cancel_flag {
+            if flag.load(Ordering::Relaxed) {
+                return Ok(probes);
+            }
+        }
+
         if !entry.file_type().is_file() {
             continue;
         }
         let path = entry.path();
-        // Skip files belonging to child roots
-        if excluded_prefixes.iter().any(|p| path.starts_with(p)) {
-            continue;
-        }
         if !is_supported_file(path) {
             continue;
         }
@@ -484,6 +556,11 @@ fn collect_image_probes_incremental(
                 fingerprint,
                 status: FileStatus::New,
             });
+        }
+
+        discovered += 1;
+        if discovered % 500 == 0 {
+            let _ = db::update_discovery_progress(db_path, job_id, discovered);
         }
     }
     probes.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
@@ -666,7 +743,7 @@ mod tests {
             .map(|f| (f.rel_path.clone(), f.clone()))
             .collect();
 
-        let probes = collect_image_probes_incremental(root_dir.path(), &existing_by_path, &[])
+        let probes = collect_image_probes_incremental(root_dir.path(), &existing_by_path, &[], &db_path, 0, None)
             .expect("probes");
         assert_eq!(probes.len(), 1);
         assert!(matches!(probes[0].status, FileStatus::Unchanged));
@@ -708,7 +785,8 @@ mod tests {
         write_test_image(&img, 0xCC);
 
         let existing_by_path: HashMap<String, ExistingFile> = HashMap::new();
-        let probes = collect_image_probes_incremental(root_dir.path(), &existing_by_path, &[])
+        let dummy_db = root_dir.path().join("dummy.sqlite");
+        let probes = collect_image_probes_incremental(root_dir.path(), &existing_by_path, &[], &dummy_db, 0, None)
             .expect("probes");
         assert_eq!(probes.len(), 1);
         assert!(matches!(probes[0].status, FileStatus::New));
@@ -729,16 +807,17 @@ mod tests {
         write_test_image(&child_img, 0xEE);
 
         let existing_by_path: HashMap<String, ExistingFile> = HashMap::new();
+        let dummy_db = root_dir.path().join("dummy.sqlite");
 
         // Without exclusions: both files found
-        let probes_all = collect_image_probes_incremental(root_dir.path(), &existing_by_path, &[])
+        let probes_all = collect_image_probes_incremental(root_dir.path(), &existing_by_path, &[], &dummy_db, 0, None)
             .expect("probes all");
         assert_eq!(probes_all.len(), 2);
 
         // With child dir excluded: only parent file found
         let excluded = vec![child_dir.clone()];
         let probes_filtered =
-            collect_image_probes_incremental(root_dir.path(), &existing_by_path, &excluded)
+            collect_image_probes_incremental(root_dir.path(), &existing_by_path, &excluded, &dummy_db, 0, None)
                 .expect("probes filtered");
         assert_eq!(probes_filtered.len(), 1);
         assert_eq!(probes_filtered[0].filename, "parent.jpg");
@@ -774,7 +853,8 @@ mod tests {
             .expect("write");
 
         let existing_by_path: HashMap<String, ExistingFile> = HashMap::new();
-        let probes = collect_image_probes_incremental(root_dir.path(), &existing_by_path, &[])
+        let dummy_db = root_dir.path().join("dummy.sqlite");
+        let probes = collect_image_probes_incremental(root_dir.path(), &existing_by_path, &[], &dummy_db, 0, None)
             .expect("probes");
 
         let filenames: Vec<&str> = probes.iter().map(|p| p.filename.as_str()).collect();
