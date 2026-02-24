@@ -2,7 +2,6 @@
 ///
 /// Uses dHash (difference hash) for visual similarity and Jaccard word
 /// overlap for description similarity, combined with configurable weights.
-
 /// Hamming distance between two 64-bit hashes (number of differing bits).
 pub fn hamming_distance(a: u64, b: u64) -> u32 {
     (a ^ b).count_ones()

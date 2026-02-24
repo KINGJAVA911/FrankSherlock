@@ -117,7 +117,7 @@ fn run_scan_job_internal(
     )?;
 
     // If cancelled during discovery, bail out
-    if cancel_flag.map_or(false, |f| f.load(Ordering::Relaxed)) {
+    if cancel_flag.is_some_and(|f| f.load(Ordering::Relaxed)) {
         db::cancel_scan_job(db_path, job_id)?;
         return Ok(ScanSummary {
             root_id: job.root_id,
@@ -212,7 +212,7 @@ fn run_scan_job_internal(
         }
 
         // Helper: check cancel flag after slow operations
-        let is_cancelled = || -> bool { cancel_flag.map_or(false, |f| f.load(Ordering::Relaxed)) };
+        let is_cancelled = || -> bool { cancel_flag.is_some_and(|f| f.load(Ordering::Relaxed)) };
 
         match probe.status {
             FileStatus::Unchanged => {

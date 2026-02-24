@@ -833,29 +833,27 @@ pub fn classify_pdf(
     let mut canonical_mentions = String::new();
     if let Some(ref p) = primary {
         // Anime enrichment on the rendered page (same logic as classify_image)
-        if should_run_anime_enrichment(p) {
-            if tmp_img_path.exists() {
-                if let Some(anime) = classify_anime_details(model, &tmp_img_path, tmp_dir) {
-                    if let Some(series) = anime.get("series").and_then(clean_nullable_str) {
-                        description = format!("{description} [Series: {series}]");
-                    }
-                    let mentions =
-                        normalize_list(anime.get("canonical_mentions").unwrap_or(&Value::Null));
-                    if !mentions.is_empty() {
-                        canonical_mentions = mentions.join(", ");
-                    }
-                    if let Some(chars) = anime.get("characters").and_then(|v| v.as_array()) {
-                        let char_names: Vec<String> = chars
-                            .iter()
-                            .filter_map(|c| {
-                                c.get("name")
-                                    .and_then(|n| n.as_str())
-                                    .map(|s| s.to_string())
-                            })
-                            .collect();
-                        if !char_names.is_empty() && canonical_mentions.is_empty() {
-                            canonical_mentions = char_names.join(", ");
-                        }
+        if should_run_anime_enrichment(p) && tmp_img_path.exists() {
+            if let Some(anime) = classify_anime_details(model, &tmp_img_path, tmp_dir) {
+                if let Some(series) = anime.get("series").and_then(clean_nullable_str) {
+                    description = format!("{description} [Series: {series}]");
+                }
+                let mentions =
+                    normalize_list(anime.get("canonical_mentions").unwrap_or(&Value::Null));
+                if !mentions.is_empty() {
+                    canonical_mentions = mentions.join(", ");
+                }
+                if let Some(chars) = anime.get("characters").and_then(|v| v.as_array()) {
+                    let char_names: Vec<String> = chars
+                        .iter()
+                        .filter_map(|c| {
+                            c.get("name")
+                                .and_then(|n| n.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .collect();
+                    if !char_names.is_empty() && canonical_mentions.is_empty() {
+                        canonical_mentions = char_names.join(", ");
                     }
                 }
             }
