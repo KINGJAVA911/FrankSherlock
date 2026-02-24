@@ -7,9 +7,10 @@ use rusqlite_migration::{HookError, Migrations, M};
 
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    Album, DbStats, ExistingFile, FileMetadata, FileProperties, FileRecordUpsert,
-    HealthCheckOutcome, ParsedQuery, PurgeResult, RootInfo, ScanJobState, ScanJobStatus,
-    SearchItem, SearchRequest, SearchResponse, SmartFolder, SortField, SortOrder,
+    Album, DbStats, DuplicateFile, DuplicateGroup, DuplicatesResponse, ExistingFile,
+    FileMetadata, FileProperties, FileRecordUpsert, HealthCheckOutcome, ParsedQuery, PurgeResult,
+    RootInfo, ScanJobState, ScanJobStatus, SearchItem, SearchRequest, SearchResponse, SmartFolder,
+    SortField, SortOrder,
 };
 use crate::query_parser::parse_query;
 
@@ -1799,6 +1800,133 @@ pub fn reorder_smart_folders(db_path: &Path, ids: &[i64]) -> AppResult<()> {
     Ok(())
 }
 
+// ── Duplicates ──────────────────────────────────────────────────────
+
+pub fn find_duplicates(db_path: &Path, root_scope: &[i64]) -> AppResult<DuplicatesResponse> {
+    let conn = open_conn(db_path)?;
+
+    let mut sql = String::from(
+        "SELECT f.id, f.root_id, f.rel_path, f.abs_path, r.root_path, \
+         f.media_type, f.description, f.confidence, f.mtime_ns, f.size_bytes, \
+         f.thumb_path, f.fingerprint \
+         FROM files f \
+         JOIN roots r ON f.root_id = r.id \
+         WHERE f.deleted_at IS NULL \
+           AND f.fingerprint IN ( \
+               SELECT fingerprint FROM files \
+               WHERE deleted_at IS NULL ",
+    );
+
+    let mut bind_values: Vec<Value> = Vec::new();
+
+    if !root_scope.is_empty() {
+        let inner_ph = vec!["?"; root_scope.len()].join(", ");
+        sql.push_str(&format!("AND root_id IN ({inner_ph}) "));
+        for id in root_scope {
+            bind_values.push(Value::Integer(*id));
+        }
+    }
+
+    sql.push_str("GROUP BY fingerprint HAVING COUNT(*) > 1) ");
+
+    if !root_scope.is_empty() {
+        let outer_ph = vec!["?"; root_scope.len()].join(", ");
+        sql.push_str(&format!("AND f.root_id IN ({outer_ph}) "));
+        for id in root_scope {
+            bind_values.push(Value::Integer(*id));
+        }
+    }
+
+    sql.push_str("ORDER BY f.fingerprint, f.mtime_ns ASC, LENGTH(f.rel_path) ASC");
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(bind_values), |row| {
+        Ok((
+            row.get::<_, i64>(0)?,         // id
+            row.get::<_, i64>(1)?,         // root_id
+            row.get::<_, String>(2)?,      // rel_path
+            row.get::<_, String>(3)?,      // abs_path
+            row.get::<_, String>(4)?,      // root_path
+            row.get::<_, String>(5)?,      // media_type
+            row.get::<_, String>(6)?,      // description
+            row.get::<_, f32>(7)?,         // confidence
+            row.get::<_, i64>(8)?,         // mtime_ns
+            row.get::<_, i64>(9)?,         // size_bytes
+            row.get::<_, Option<String>>(10)?, // thumb_path
+            row.get::<_, String>(11)?,     // fingerprint
+        ))
+    })?;
+
+    let mut groups: Vec<DuplicateGroup> = Vec::new();
+    let mut current_fp = String::new();
+    let mut current_files: Vec<DuplicateFile> = Vec::new();
+
+    for row in rows {
+        let (id, root_id, rel_path, abs_path, root_path, media_type, description, confidence, mtime_ns, size_bytes, thumb_path, fingerprint) = row?;
+
+        if fingerprint != current_fp {
+            if !current_files.is_empty() {
+                groups.push(build_duplicate_group(&current_fp, &mut current_files));
+            }
+            current_fp = fingerprint;
+            current_files.clear();
+        }
+
+        current_files.push(DuplicateFile {
+            id,
+            root_id,
+            rel_path,
+            abs_path,
+            root_path,
+            media_type,
+            description,
+            confidence,
+            mtime_ns,
+            size_bytes,
+            thumbnail_path: thumb_path,
+            is_keeper: false,
+        });
+    }
+
+    if !current_files.is_empty() {
+        groups.push(build_duplicate_group(&current_fp, &mut current_files));
+    }
+
+    let total_groups = groups.len() as u64;
+    let total_duplicate_files: u64 = groups
+        .iter()
+        .map(|g| g.file_count.saturating_sub(1))
+        .sum();
+    let total_wasted_bytes: i64 = groups.iter().map(|g| g.wasted_bytes).sum();
+
+    Ok(DuplicatesResponse {
+        total_groups,
+        total_duplicate_files,
+        total_wasted_bytes,
+        groups,
+    })
+}
+
+fn build_duplicate_group(fingerprint: &str, files: &mut [DuplicateFile]) -> DuplicateGroup {
+    // Mark the keeper: first file is already the oldest (ORDER BY mtime_ns ASC, path length ASC)
+    if !files.is_empty() {
+        files[0].is_keeper = true;
+    }
+
+    let file_count = files.len() as u64;
+    let file_size = files.first().map(|f| f.size_bytes).unwrap_or(0);
+    let total_size_bytes = file_size * file_count as i64;
+    let wasted_bytes = file_size * (file_count.saturating_sub(1)) as i64;
+
+    DuplicateGroup {
+        fingerprint: fingerprint.to_string(),
+        file_count,
+        total_size_bytes,
+        wasted_bytes,
+        files: files.to_vec(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -3209,5 +3337,142 @@ mod tests {
         let path_strs: Vec<&str> = paths.iter().map(|(_, p)| p.as_str()).collect();
         assert!(path_strs.contains(&"/home/a"));
         assert!(path_strs.contains(&"/home/b"));
+    }
+
+    // ── Duplicates tests ────────────────────────────────────────────
+
+    #[test]
+    fn find_duplicates_empty_db() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let resp = find_duplicates(&db_path, &[]).expect("find");
+        assert_eq!(resp.total_groups, 0);
+        assert_eq!(resp.total_duplicate_files, 0);
+        assert_eq!(resp.total_wasted_bytes, 0);
+        assert!(resp.groups.is_empty());
+    }
+
+    #[test]
+    fn find_duplicates_no_dupes() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/demo").expect("root");
+        upsert_file_record(&db_path, &sample_record(root_id, "a.jpg", "fp-a")).expect("a");
+        upsert_file_record(&db_path, &sample_record(root_id, "b.jpg", "fp-b")).expect("b");
+        let resp = find_duplicates(&db_path, &[]).expect("find");
+        assert_eq!(resp.total_groups, 0);
+    }
+
+    #[test]
+    fn find_duplicates_basic_groups() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/demo").expect("root");
+
+        // Two files with same fingerprint
+        upsert_file_record(&db_path, &sample_record(root_id, "a.jpg", "fp-dup")).expect("a");
+        upsert_file_record(&db_path, &sample_record(root_id, "b.jpg", "fp-dup")).expect("b");
+        // Unique file
+        upsert_file_record(&db_path, &sample_record(root_id, "c.jpg", "fp-unique")).expect("c");
+
+        let resp = find_duplicates(&db_path, &[]).expect("find");
+        assert_eq!(resp.total_groups, 1);
+        assert_eq!(resp.total_duplicate_files, 1); // 2 files - 1 keeper = 1 duplicate
+        assert_eq!(resp.groups[0].file_count, 2);
+        assert_eq!(resp.groups[0].files.len(), 2);
+    }
+
+    #[test]
+    fn find_duplicates_keeper_heuristic() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/demo").expect("root");
+
+        let mut older = sample_record(root_id, "original.jpg", "fp-dup");
+        older.mtime_ns = 1_000_000_000_000_000_000;
+        upsert_file_record(&db_path, &older).expect("older");
+
+        let mut newer = sample_record(root_id, "copy.jpg", "fp-dup");
+        newer.mtime_ns = 2_000_000_000_000_000_000;
+        upsert_file_record(&db_path, &newer).expect("newer");
+
+        let resp = find_duplicates(&db_path, &[]).expect("find");
+        let group = &resp.groups[0];
+        // Keeper should be the older file
+        let keeper = group.files.iter().find(|f| f.is_keeper).unwrap();
+        assert!(keeper.rel_path.contains("original"));
+        let non_keeper = group.files.iter().find(|f| !f.is_keeper).unwrap();
+        assert!(non_keeper.rel_path.contains("copy"));
+    }
+
+    #[test]
+    fn find_duplicates_root_scope_filter() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_a = upsert_root(&db_path, "/tmp/a").expect("root_a");
+        let root_b = upsert_root(&db_path, "/tmp/b").expect("root_b");
+
+        let mut rec_a = sample_record(root_a, "x.jpg", "fp-dup");
+        rec_a.abs_path = "/tmp/a/x.jpg".to_string();
+        upsert_file_record(&db_path, &rec_a).expect("a");
+
+        let mut rec_b = sample_record(root_b, "x.jpg", "fp-dup");
+        rec_b.abs_path = "/tmp/b/x.jpg".to_string();
+        upsert_file_record(&db_path, &rec_b).expect("b");
+
+        // Without scope — should find the group
+        let resp = find_duplicates(&db_path, &[]).expect("all");
+        assert_eq!(resp.total_groups, 1);
+
+        // Scoped to root_a only — no duplicates within a single root
+        let resp = find_duplicates(&db_path, &[root_a]).expect("scoped");
+        assert_eq!(resp.total_groups, 0);
+    }
+
+    #[test]
+    fn find_duplicates_excludes_deleted() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/demo").expect("root");
+
+        upsert_file_record(&db_path, &sample_record(root_id, "a.jpg", "fp-dup")).expect("a");
+        upsert_file_record(&db_path, &sample_record(root_id, "b.jpg", "fp-dup")).expect("b");
+
+        // Soft-delete one of them
+        let conn = open_conn(&db_path).unwrap();
+        conn.execute(
+            "UPDATE files SET deleted_at = 12345 WHERE rel_path = 'b.jpg'",
+            [],
+        )
+        .unwrap();
+
+        let resp = find_duplicates(&db_path, &[]).expect("find");
+        assert_eq!(resp.total_groups, 0);
+    }
+
+    #[test]
+    fn find_duplicates_wasted_bytes() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/demo").expect("root");
+
+        let mut rec = sample_record(root_id, "a.jpg", "fp-dup");
+        rec.size_bytes = 5000;
+        upsert_file_record(&db_path, &rec).expect("a");
+        rec.rel_path = "b.jpg".to_string();
+        rec.abs_path = "/tmp/demo/b.jpg".to_string();
+        rec.filename = "b.jpg".to_string();
+        upsert_file_record(&db_path, &rec).expect("b");
+        rec.rel_path = "c.jpg".to_string();
+        rec.abs_path = "/tmp/demo/c.jpg".to_string();
+        rec.filename = "c.jpg".to_string();
+        upsert_file_record(&db_path, &rec).expect("c");
+
+        let resp = find_duplicates(&db_path, &[]).expect("find");
+        assert_eq!(resp.total_groups, 1);
+        assert_eq!(resp.groups[0].file_count, 3);
+        assert_eq!(resp.groups[0].wasted_bytes, 10_000); // 5000 * 2 extra copies
+        assert_eq!(resp.total_wasted_bytes, 10_000);
+        assert_eq!(resp.total_duplicate_files, 2);
     }
 }

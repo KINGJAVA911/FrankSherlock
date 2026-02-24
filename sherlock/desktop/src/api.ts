@@ -4,6 +4,7 @@ import type {
   AppPaths,
   DbStats,
   DeleteFilesResult,
+  DuplicatesResponse,
   FileMetadata,
   FileProperties,
   HealthStatus,
@@ -155,6 +156,12 @@ export async function deleteSmartFolder(folderId: number): Promise<void> {
 
 export async function listSmartFolders(): Promise<SmartFolder[]> {
   return invoke<SmartFolder[]>("list_smart_folders");
+}
+
+// ── Duplicates ──────────────────────────────────────────────────────
+
+export async function findDuplicates(rootScope: number[] = []): Promise<DuplicatesResponse> {
+  return invoke<DuplicatesResponse>("find_duplicates", { rootScope });
 }
 
 // ── Reorder ─────────────────────────────────────────────────────────

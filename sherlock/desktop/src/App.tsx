@@ -2,14 +2,17 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   addFilesToAlbum, cancelScan, copyFilesToClipboard, createAlbum, createSmartFolder,
-  deleteAlbum, deleteFiles, deleteSmartFolder, ensureDatabase, getCliFolderPath,
-  getFileMetadata, listAlbums, listRoots, listSmartFolders, removeRoot,
-  renameFile, reorderAlbums, reorderRoots, reorderSmartFolders, startScan,
-  updateFileMetadata,
+  deleteAlbum, deleteFiles, deleteSmartFolder, ensureDatabase, findDuplicates,
+  getCliFolderPath, getFileMetadata, listAlbums, listRoots, listSmartFolders,
+  removeRoot, renameFile, reorderAlbums, reorderRoots, reorderSmartFolders,
+  startScan, updateFileMetadata,
 } from "./api";
 import type {
   Album,
   DbStats,
+  DuplicateFile,
+  DuplicateGroup,
+  DuplicatesResponse,
   FileMetadata,
   RootInfo,
   RuntimeStatus,
@@ -24,6 +27,7 @@ import { fileName } from "./utils/format";
 import Titlebar from "./components/Titlebar/Titlebar";
 import Sidebar from "./components/Sidebar/Sidebar";
 import Content from "./components/Content/Content";
+import DuplicatesView from "./components/Content/DuplicatesView";
 import ContextMenu from "./components/Content/ContextMenu";
 import StatusBar from "./components/StatusBar/StatusBar";
 import ToastContainer from "./components/Toasts/ToastContainer";
@@ -87,6 +91,12 @@ export default function App() {
   const [showCreateSmartFolder, setShowCreateSmartFolder] = useState(false);
   const [pendingAlbumFileIds, setPendingAlbumFileIds] = useState<number[]>([]);
   const [activeSmartFolderId, setActiveSmartFolderId] = useState<number | null>(null);
+
+  /* ── Duplicates state ── */
+  const [duplicatesMode, setDuplicatesMode] = useState(false);
+  const [duplicatesData, setDuplicatesData] = useState<DuplicatesResponse | null>(null);
+  const [duplicatesLoading, setDuplicatesLoading] = useState(false);
+  const [duplicatesSelected, setDuplicatesSelected] = useState<Set<number>>(new Set());
 
   /* ── Refs ── */
   const sentinelRef = useRef<HTMLDivElement>(null);
@@ -297,6 +307,7 @@ export default function App() {
 
   // Derive subtitle for titlebar based on current context
   const subtitle = useMemo(() => {
+    if (duplicatesMode) return "Find Duplicates";
     if (activeAlbumName) return activeAlbumName;
     const sf = smartFolders.find(f => f.id === activeSmartFolderId);
     if (sf) return sf.name;
@@ -305,7 +316,7 @@ export default function App() {
       if (root) return root.rootName;
     }
     return null;
-  }, [activeAlbumName, activeSmartFolderId, smartFolders, selectedRootId, roots]);
+  }, [duplicatesMode, activeAlbumName, activeSmartFolderId, smartFolders, selectedRootId, roots]);
 
   /* ── Handlers ── */
   function onWindowClose() {
@@ -435,6 +446,14 @@ export default function App() {
       if (result.errors.length > 0) {
         setError(`Some files had errors: ${result.errors[0]}`);
       }
+      // Refresh duplicates view if active
+      if (duplicatesMode) {
+        setDuplicatesSelected(new Set());
+        try {
+          const resp = await findDuplicates();
+          setDuplicatesData(resp);
+        } catch { /* ignore */ }
+      }
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -470,6 +489,109 @@ export default function App() {
     } catch (err) {
       setError(errorMessage(err));
     }
+  }
+
+  /* ── Duplicates handlers ── */
+  async function handleFindDuplicates() {
+    setDuplicatesMode(true);
+    setDuplicatesLoading(true);
+    setDuplicatesSelected(new Set());
+    setDuplicatesData(null);
+    try {
+      const resp = await findDuplicates();
+      setDuplicatesData(resp);
+    } catch (err) {
+      setError(errorMessage(err));
+      setDuplicatesMode(false);
+    } finally {
+      setDuplicatesLoading(false);
+    }
+  }
+
+  function handleDuplicatesToggleFile(fileId: number) {
+    setDuplicatesSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(fileId)) next.delete(fileId);
+      else next.add(fileId);
+      return next;
+    });
+  }
+
+  function handleDuplicatesSelectAll() {
+    if (!duplicatesData) return;
+    const ids = new Set<number>();
+    for (const group of duplicatesData.groups) {
+      for (const file of group.files) {
+        if (!file.isKeeper) ids.add(file.id);
+      }
+    }
+    setDuplicatesSelected(ids);
+  }
+
+  function handleDuplicatesSelectGroup(group: DuplicateGroup) {
+    setDuplicatesSelected((prev) => {
+      const next = new Set(prev);
+      for (const file of group.files) {
+        if (!file.isKeeper) next.add(file.id);
+      }
+      return next;
+    });
+  }
+
+  function handleDuplicatesPreviewFile(file: DuplicateFile) {
+    // Reuse PreviewModal by creating a temporary SearchItem-compatible object
+    const asSearchItem: SearchItem = {
+      id: file.id,
+      rootId: file.rootId,
+      relPath: file.relPath,
+      absPath: file.absPath,
+      mediaType: file.mediaType,
+      description: file.description,
+      confidence: file.confidence,
+      mtimeNs: file.mtimeNs,
+      sizeBytes: file.sizeBytes,
+      thumbnailPath: file.thumbnailPath,
+    };
+    setConfirmDeleteFiles(null);
+    // Open preview using existing mechanism — single item
+    selectOnly(0);
+    // Store temporarily in items-like structure for preview
+    // Actually, just open the preview modal directly with the file data
+    setPreviewOpen(false);
+    // Use a simpler approach: set a temp array and open preview
+    setDupPreviewItems([asSearchItem]);
+  }
+
+  const [dupPreviewItems, setDupPreviewItems] = useState<SearchItem[]>([]);
+
+  function handleDuplicatesDeleteSelected() {
+    if (!duplicatesData || duplicatesSelected.size === 0) return;
+    const filesToDelete: SearchItem[] = [];
+    for (const group of duplicatesData.groups) {
+      for (const file of group.files) {
+        if (duplicatesSelected.has(file.id)) {
+          filesToDelete.push({
+            id: file.id,
+            rootId: file.rootId,
+            relPath: file.relPath,
+            absPath: file.absPath,
+            mediaType: file.mediaType,
+            description: file.description,
+            confidence: file.confidence,
+            mtimeNs: file.mtimeNs,
+            sizeBytes: file.sizeBytes,
+            thumbnailPath: file.thumbnailPath,
+          });
+        }
+      }
+    }
+    if (filesToDelete.length > 0) setConfirmDeleteFiles(filesToDelete);
+  }
+
+  function handleDuplicatesBack() {
+    setDuplicatesMode(false);
+    setDuplicatesData(null);
+    setDuplicatesSelected(new Set());
   }
 
   /* ── Album handlers ── */
@@ -612,6 +734,16 @@ export default function App() {
           onNavigate={(idx) => { selectOnly(idx); }}
         />
       )}
+      {dupPreviewItems.length > 0 && (
+        <PreviewModal
+          previewItems={dupPreviewItems}
+          selectedCount={1}
+          singlePreviewIndex={0}
+          totalItems={1}
+          onClose={() => setDupPreviewItems([])}
+          onNavigate={() => {}}
+        />
+      )}
       {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
       {showModelInfo && runtime && (
         <ModelInfoModal runtime={runtime} setup={setup} onClose={() => setShowModelInfo(false)} />
@@ -732,35 +864,51 @@ export default function App() {
           onReorderRoots={handleReorderRoots}
           onReorderAlbums={handleReorderAlbums}
           onReorderSmartFolders={handleReorderSmartFolders}
+          onFindDuplicates={handleFindDuplicates}
         />
 
-        <Content
-          query={query}
-          onQueryChange={(q) => { setQuery(q); setActiveSmartFolderId(null); }}
-          selectedMediaType={selectedMediaType}
-          onMediaTypeChange={setSelectedMediaType}
-          mediaTypeOptions={mediaTypeOptions}
-          sortBy={sortBy}
-          onSortByChange={setSortBy}
-          sortOrder={sortOrder}
-          onSortOrderChange={setSortOrder}
-          hasTextQuery={query.trim().length > 0}
-          onSaveSmartFolder={() => setShowCreateSmartFolder(true)}
-          items={items}
-          total={total}
-          loading={loading}
-          loadingMore={loadingMore}
-          canLoadMore={canLoadMore}
-          isScanning={isScanning}
-          selectedRootName={selectedRootId != null ? (roots.find((r) => r.id === selectedRootId)?.rootName ?? null) : null}
-          selectedIndices={selectedIndices}
-          focusIndex={focusIndex}
-          gridRef={gridRef}
-          sentinelRef={sentinelRef}
-          onTileClick={onTileClick}
-          onTileDoubleClick={onTileDoubleClick}
-          onTileContextMenu={onTileContextMenu}
-        />
+        {duplicatesMode && duplicatesData ? (
+          <DuplicatesView
+            data={duplicatesData}
+            loading={duplicatesLoading}
+            selected={duplicatesSelected}
+            onToggleFile={handleDuplicatesToggleFile}
+            onSelectAllDuplicates={handleDuplicatesSelectAll}
+            onDeselectAll={() => setDuplicatesSelected(new Set())}
+            onDeleteSelected={handleDuplicatesDeleteSelected}
+            onBack={handleDuplicatesBack}
+            onSelectGroupDuplicates={handleDuplicatesSelectGroup}
+            onPreviewFile={handleDuplicatesPreviewFile}
+          />
+        ) : (
+          <Content
+            query={query}
+            onQueryChange={(q) => { setQuery(q); setActiveSmartFolderId(null); }}
+            selectedMediaType={selectedMediaType}
+            onMediaTypeChange={setSelectedMediaType}
+            mediaTypeOptions={mediaTypeOptions}
+            sortBy={sortBy}
+            onSortByChange={setSortBy}
+            sortOrder={sortOrder}
+            onSortOrderChange={setSortOrder}
+            hasTextQuery={query.trim().length > 0}
+            onSaveSmartFolder={() => setShowCreateSmartFolder(true)}
+            items={items}
+            total={total}
+            loading={loading}
+            loadingMore={loadingMore}
+            canLoadMore={canLoadMore}
+            isScanning={isScanning}
+            selectedRootName={selectedRootId != null ? (roots.find((r) => r.id === selectedRootId)?.rootName ?? null) : null}
+            selectedIndices={selectedIndices}
+            focusIndex={focusIndex}
+            gridRef={gridRef}
+            sentinelRef={sentinelRef}
+            onTileClick={onTileClick}
+            onTileDoubleClick={onTileDoubleClick}
+            onTileContextMenu={onTileContextMenu}
+          />
+        )}
       </div>
 
       {/* ── Status Bar ── */}

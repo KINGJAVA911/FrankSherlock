@@ -30,6 +30,7 @@ const defaultProps = {
   onReorderRoots: vi.fn(),
   onReorderAlbums: vi.fn(),
   onReorderSmartFolders: vi.fn(),
+  onFindDuplicates: vi.fn(),
 };
 
 describe("Sidebar", () => {
@@ -133,5 +134,22 @@ describe("Sidebar", () => {
     render(<Sidebar {...defaultProps} roots={[sampleRoot]} readOnly />);
     const card = screen.getByText("photos").closest(".root-card")!;
     expect(card.parentElement?.getAttribute("draggable")).toBe("false");
+  });
+
+  it("shows Find Duplicates button when onFindDuplicates is provided", () => {
+    render(<Sidebar {...defaultProps} onFindDuplicates={vi.fn()} />);
+    expect(screen.getByText("Find Duplicates")).toBeInTheDocument();
+  });
+
+  it("calls onFindDuplicates when button is clicked", async () => {
+    const onFindDuplicates = vi.fn();
+    render(<Sidebar {...defaultProps} onFindDuplicates={onFindDuplicates} />);
+    await userEvent.click(screen.getByText("Find Duplicates"));
+    expect(onFindDuplicates).toHaveBeenCalled();
+  });
+
+  it("does not show Find Duplicates button when onFindDuplicates is not provided", () => {
+    render(<Sidebar {...defaultProps} onFindDuplicates={undefined} />);
+    expect(screen.queryByText("Find Duplicates")).not.toBeInTheDocument();
   });
 });

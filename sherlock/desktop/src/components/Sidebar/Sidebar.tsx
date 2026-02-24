@@ -31,6 +31,7 @@ type SidebarProps = {
   onReorderRoots?: (ids: number[]) => void;
   onReorderAlbums?: (ids: number[]) => void;
   onReorderSmartFolders?: (ids: number[]) => void;
+  onFindDuplicates?: () => void;
 };
 
 export default function Sidebar({
@@ -39,7 +40,7 @@ export default function Sidebar({
   onSelectRoot, onDeleteRoot, onRescanRoot, onCopyRootPath, onPickAndScan,
   onCancelScan, onResumeScan,
   onSelectAlbum, onDeleteAlbum, onSelectSmartFolder, onDeleteSmartFolder,
-  onReorderRoots, onReorderAlbums, onReorderSmartFolders,
+  onReorderRoots, onReorderAlbums, onReorderSmartFolders, onFindDuplicates,
 }: SidebarProps) {
   const rootsDrag = useDragReorder({ items: roots, onReorder: onReorderRoots ?? (() => {}), readOnly });
   const albumsDrag = useDragReorder({ items: albums, onReorder: onReorderAlbums ?? (() => {}), readOnly });
@@ -130,6 +131,21 @@ export default function Sidebar({
                   </div>
                 );
               })}
+            </div>
+          </>
+        )}
+        {onFindDuplicates && (
+          <>
+            <div className="sidebar-section"><span>Tools</span></div>
+            <div className="sidebar-tool-list">
+              <button
+                type="button"
+                className="sidebar-tool-btn"
+                onClick={onFindDuplicates}
+                title="Find duplicate files across all folders"
+              >
+                Find Duplicates
+              </button>
             </div>
           </>
         )}

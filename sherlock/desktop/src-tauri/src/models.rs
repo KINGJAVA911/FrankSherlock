@@ -360,3 +360,39 @@ pub struct RenameFileResult {
     pub new_abs_path: String,
     pub new_filename: String,
 }
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicateFile {
+    pub id: i64,
+    pub root_id: i64,
+    pub rel_path: String,
+    pub abs_path: String,
+    pub root_path: String,
+    pub media_type: String,
+    pub description: String,
+    pub confidence: f32,
+    pub mtime_ns: i64,
+    pub size_bytes: i64,
+    pub thumbnail_path: Option<String>,
+    pub is_keeper: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicateGroup {
+    pub fingerprint: String,
+    pub file_count: u64,
+    pub total_size_bytes: i64,
+    pub wasted_bytes: i64,
+    pub files: Vec<DuplicateFile>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DuplicatesResponse {
+    pub total_groups: u64,
+    pub total_duplicate_files: u64,
+    pub total_wasted_bytes: i64,
+    pub groups: Vec<DuplicateGroup>,
+}

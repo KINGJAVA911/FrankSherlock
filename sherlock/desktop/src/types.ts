@@ -210,3 +210,33 @@ export type SmartFolder = {
   query: string;
   createdAt: number;
 };
+
+export type DuplicateFile = {
+  id: number;
+  rootId: number;
+  relPath: string;
+  absPath: string;
+  rootPath: string;
+  mediaType: string;
+  description: string;
+  confidence: number;
+  mtimeNs: number;
+  sizeBytes: number;
+  thumbnailPath?: string | null;
+  isKeeper: boolean;
+};
+
+export type DuplicateGroup = {
+  fingerprint: string;
+  fileCount: number;
+  totalSizeBytes: number;
+  wastedBytes: number;
+  files: DuplicateFile[];
+};
+
+export type DuplicatesResponse = {
+  totalGroups: number;
+  totalDuplicateFiles: number;
+  totalWastedBytes: number;
+  groups: DuplicateGroup[];
+};

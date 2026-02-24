@@ -19,9 +19,9 @@ use std::sync::{Arc, Mutex};
 use config::{prepare_dirs, resolve_paths, AppPaths};
 use error::AppError;
 use models::{
-    Album, DeleteFilesResult, HealthCheckOutcome, HealthStatus, PurgeResult, RenameFileResult,
-    RootInfo, RuntimeStatus, ScanJobStatus, SearchRequest, SearchResponse, SetupDownloadStatus,
-    SetupStatus, SmartFolder, VenvProvisionStatus,
+    Album, DeleteFilesResult, DuplicatesResponse, HealthCheckOutcome, HealthStatus, PurgeResult,
+    RenameFileResult, RootInfo, RuntimeStatus, ScanJobStatus, SearchRequest, SearchResponse,
+    SetupDownloadStatus, SetupStatus, SmartFolder, VenvProvisionStatus,
 };
 use tauri::Manager;
 use tauri::State;
@@ -489,6 +489,20 @@ fn update_file_metadata(
     .map_err(|e| e.to_string())
 }
 
+// ── Duplicates ──────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn find_duplicates(
+    root_scope: Vec<i64>,
+    state: State<'_, AppState>,
+) -> Result<DuplicatesResponse, String> {
+    let db_path = state.paths.db_file.clone();
+    tauri::async_runtime::spawn_blocking(move || db::find_duplicates(&db_path, &root_scope))
+        .await
+        .map_err(|e| AppError::Join(e.to_string()).to_string())?
+        .map_err(|e| e.to_string())
+}
+
 // ── Album commands ───────────────────────────────────────────────────
 
 #[tauri::command]
@@ -941,6 +955,7 @@ pub fn run() {
             get_file_metadata,
             get_file_properties,
             update_file_metadata,
+            find_duplicates,
             create_album,
             delete_album,
             list_albums,

@@ -1,4 +1,4 @@
-import type { Album, RootInfo, ScanJobStatus, SearchItem, SmartFolder } from "../types";
+import type { Album, DuplicateFile, DuplicateGroup, DuplicatesResponse, RootInfo, ScanJobStatus, SearchItem, SmartFolder } from "../types";
 
 export const mockSearchItem: SearchItem = {
   id: 1,
@@ -52,4 +52,49 @@ export const mockSmartFolder: SmartFolder = {
   name: "Anime photos",
   query: "anime photo",
   createdAt: 0,
+};
+
+export const mockDuplicateFileKeeper: DuplicateFile = {
+  id: 10,
+  rootId: 1,
+  relPath: "photos/original.jpg",
+  absPath: "/home/user/photos/original.jpg",
+  rootPath: "/home/user/photos",
+  mediaType: "photo",
+  description: "A sunset photo",
+  confidence: 0.9,
+  mtimeNs: 1000000000000,
+  sizeBytes: 5000,
+  thumbnailPath: "/cache/thumb10.jpg",
+  isKeeper: true,
+};
+
+export const mockDuplicateFileCopy: DuplicateFile = {
+  id: 11,
+  rootId: 1,
+  relPath: "backup/original_copy.jpg",
+  absPath: "/home/user/photos/backup/original_copy.jpg",
+  rootPath: "/home/user/photos",
+  mediaType: "photo",
+  description: "A sunset photo",
+  confidence: 0.9,
+  mtimeNs: 2000000000000,
+  sizeBytes: 5000,
+  thumbnailPath: "/cache/thumb11.jpg",
+  isKeeper: false,
+};
+
+export const mockDuplicateGroup: DuplicateGroup = {
+  fingerprint: "abc123",
+  fileCount: 2,
+  totalSizeBytes: 10000,
+  wastedBytes: 5000,
+  files: [mockDuplicateFileKeeper, mockDuplicateFileCopy],
+};
+
+export const mockDuplicatesResponse: DuplicatesResponse = {
+  totalGroups: 1,
+  totalDuplicateFiles: 1,
+  totalWastedBytes: 5000,
+  groups: [mockDuplicateGroup],
 };
