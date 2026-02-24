@@ -272,8 +272,7 @@ fn run_scan_job_internal(
             FileStatus::Unchanged => unreachable!("filtered above"),
             FileStatus::Modified => {
                 // Re-classify and regenerate thumbnail
-                let classification =
-                    classify_and_thumbnail(ctx, probe);
+                let classification = classify_and_thumbnail(ctx, probe);
                 if is_cancelled() {
                     db::cancel_scan_job(db_path, job_id)?;
                     return Ok(ScanSummary {
@@ -361,8 +360,7 @@ fn run_scan_job_internal(
                 }
 
                 // Genuinely new file — classify
-                let classification =
-                    classify_and_thumbnail(ctx, probe);
+                let classification = classify_and_thumbnail(ctx, probe);
                 if is_cancelled() {
                     db::cancel_scan_job(db_path, job_id)?;
                     return Ok(ScanSummary {
@@ -465,7 +463,8 @@ fn classify_and_thumbnail(ctx: &ScanContext, probe: &FileProbe) -> ClassifyAndTh
     let abs = Path::new(&probe.abs_path);
     let is_pdf = is_pdf_file(abs);
 
-    // For password-protected PDFs, try saved passwords from the DB
+    // For password-protected PDFs, try saved passwords from the DB.
+    // Must run first — both classification and thumbnail need the password.
     let pdf_password: Option<String> =
         if is_pdf && crate::pdf::is_password_protected(abs, &ctx.pdfium_lib_path) {
             let passwords = db::get_all_pdf_password_strings(&ctx.db_path).unwrap_or_default();
@@ -474,53 +473,79 @@ fn classify_and_thumbnail(ctx: &ScanContext, probe: &FileProbe) -> ClassifyAndTh
             None
         };
 
-    let classification = if is_pdf {
-        classify::classify_pdf(
-            abs,
-            &ctx.model,
-            &ctx.tmp_dir,
-            &ctx.surya_venv_dir,
-            &ctx.surya_script,
-            &ctx.pdfium_lib_path,
-            pdf_password.as_deref(),
-        )
-    } else {
-        classify::classify_image(
-            abs,
-            &ctx.model,
-            &ctx.tmp_dir,
-            &ctx.surya_venv_dir,
-            &ctx.surya_script,
-        )
-    };
+    // Run thumbnail+EXIF in parallel with LLM classification.
+    // Classification is GPU-bound (Ollama HTTP), thumbnail+EXIF are CPU/IO-bound.
+    let (classification, thumb_path, dhash, location_text) = std::thread::scope(|s| {
+        // Spawn thumbnail + EXIF on a separate thread
+        let thumb_handle = s.spawn(|| {
+            let thumb_result = if is_pdf {
+                thumbnail::generate_pdf_thumbnail(
+                    abs,
+                    &ctx.thumbnails_dir,
+                    &probe.rel_path,
+                    &ctx.pdfium_lib_path,
+                    pdf_password.as_deref(),
+                )
+            } else {
+                thumbnail::generate_thumbnail(abs, &ctx.thumbnails_dir, &probe.rel_path)
+            };
 
-    let thumb_result = if is_pdf {
-        thumbnail::generate_pdf_thumbnail(
-            abs,
-            &ctx.thumbnails_dir,
-            &probe.rel_path,
-            &ctx.pdfium_lib_path,
-            pdf_password.as_deref(),
+            let exif_location: crate::exif::ExifLocation = if is_pdf {
+                Default::default()
+            } else {
+                crate::exif::extract_location(abs)
+            };
+
+            (thumb_result, exif_location)
+        });
+
+        // LLM classification runs on the calling thread
+        let classification = if is_pdf {
+            classify::classify_pdf(
+                abs,
+                &ctx.model,
+                &ctx.tmp_dir,
+                &ctx.surya_venv_dir,
+                &ctx.surya_script,
+                &ctx.pdfium_lib_path,
+                pdf_password.as_deref(),
+            )
+        } else {
+            classify::classify_image(
+                abs,
+                &ctx.model,
+                &ctx.tmp_dir,
+                &ctx.surya_venv_dir,
+                &ctx.surya_script,
+            )
+        };
+
+        // Join thumbnail/EXIF thread, handling panics gracefully
+        let (thumb_result, exif_location) = match thumb_handle.join() {
+            Ok(result) => result,
+            Err(_) => {
+                log::error!("Thumbnail/EXIF thread panicked for {}", probe.abs_path);
+                (None, Default::default())
+            }
+        };
+
+        let (thumb_path, dhash) = match thumb_result {
+            Some(tr) => (Some(tr.path), tr.dhash),
+            None => (None, None),
+        };
+
+        (
+            classification,
+            thumb_path,
+            dhash,
+            exif_location.location_text,
         )
-    } else {
-        thumbnail::generate_thumbnail(abs, &ctx.thumbnails_dir, &probe.rel_path)
-    };
-
-    let (thumb_path, dhash) = match thumb_result {
-        Some(tr) => (Some(tr.path), tr.dhash),
-        None => (None, None),
-    };
-
-    let exif_location = if is_pdf {
-        Default::default()
-    } else {
-        crate::exif::extract_location(abs)
-    };
+    });
 
     ClassifyAndThumbResult {
         classification,
         thumb_path,
-        location_text: exif_location.location_text,
+        location_text,
         dhash,
     }
 }
@@ -579,11 +604,7 @@ fn collect_image_probes_incremental(
         // Use entry.metadata() to avoid a redundant stat() syscall —
         // WalkDir already called lstat() during the walk.
         let metadata = entry.metadata().map_err(|e| {
-            crate::error::AppError::Config(format!(
-                "metadata for {}: {}",
-                path.display(),
-                e
-            ))
+            crate::error::AppError::Config(format!("metadata for {}: {}", path.display(), e))
         })?;
         // Skip tiny images (icons, spacer GIFs, favicons) but not PDFs
         let ext_lower = path
