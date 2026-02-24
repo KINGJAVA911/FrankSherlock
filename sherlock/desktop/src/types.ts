@@ -234,6 +234,11 @@ export type RetryProtectedPdfsResult = {
   stillProtected: number;
 };
 
+export type UpdateInfo = {
+  version: string;
+  body: string | null;
+};
+
 export type DuplicateFile = {
   id: number;
   rootId: number;

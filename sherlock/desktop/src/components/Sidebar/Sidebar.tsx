@@ -1,4 +1,4 @@
-import type { Album, DbStats, RootInfo, ScanJobStatus, SmartFolder } from "../../types";
+import type { Album, DbStats, RootInfo, ScanJobStatus, SmartFolder, UpdateInfo } from "../../types";
 import { formatBytes } from "../../utils/format";
 import { useDragReorder } from "../../hooks/useDragReorder";
 import RootCard from "./RootCard";
@@ -33,6 +33,12 @@ type SidebarProps = {
   onReorderSmartFolders?: (ids: number[]) => void;
   onFindDuplicates?: () => void;
   onOpenPdfPasswords?: () => void;
+  updateInfo?: UpdateInfo | null;
+  updateChecking?: boolean;
+  updateDownloading?: boolean;
+  updateProgress?: { downloaded: number; total: number | null } | null;
+  onCheckUpdates?: () => void;
+  onInstallUpdate?: () => void;
 };
 
 export default function Sidebar({
@@ -43,6 +49,8 @@ export default function Sidebar({
   onSelectAlbum, onDeleteAlbum, onSelectSmartFolder, onDeleteSmartFolder,
   onReorderRoots, onReorderAlbums, onReorderSmartFolders, onFindDuplicates,
   onOpenPdfPasswords,
+  updateInfo, updateChecking, updateDownloading, updateProgress,
+  onCheckUpdates, onInstallUpdate,
 }: SidebarProps) {
   const rootsDrag = useDragReorder({ items: roots, onReorder: onReorderRoots ?? (() => {}), readOnly });
   const albumsDrag = useDragReorder({ items: albums, onReorder: onReorderAlbums ?? (() => {}), readOnly });
@@ -138,7 +146,7 @@ export default function Sidebar({
         )}
       </div>
 
-      {(onFindDuplicates || onOpenPdfPasswords) && (
+      {(onFindDuplicates || onOpenPdfPasswords || onCheckUpdates) && (
         <div className="sidebar-tools-fixed">
           <div className="sidebar-section"><span>Tools</span></div>
           <div className="sidebar-tool-list">
@@ -160,6 +168,23 @@ export default function Sidebar({
                 title="Manage passwords for protected PDFs"
               >
                 PDF Passwords
+              </button>
+            )}
+            {onCheckUpdates && (
+              <button
+                type="button"
+                className={`sidebar-tool-btn${updateInfo ? " update-available" : ""}`}
+                onClick={updateInfo ? onInstallUpdate : onCheckUpdates}
+                disabled={updateChecking || updateDownloading}
+                title={updateInfo ? `Update to v${updateInfo.version}` : "Check for updates"}
+              >
+                {updateDownloading
+                  ? `Updating... ${updateProgress?.total ? Math.round((updateProgress.downloaded / updateProgress.total) * 100) : 0}%`
+                  : updateChecking
+                    ? "Checking..."
+                    : updateInfo
+                      ? `Update to v${updateInfo.version}`
+                      : "Check for Updates"}
               </button>
             )}
           </div>

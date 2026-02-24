@@ -135,6 +135,25 @@
   background: var(--bg-hover);
 }
 
+.sidebar-tool-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.sidebar-tool-btn:disabled:hover {
+  border-color: var(--border-primary);
+  background: var(--bg-input);
+}
+
+.sidebar-tool-btn.update-available {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.sidebar-tool-btn.update-available:hover {
+  background: var(--bg-hover);
+}
+
 /* ── Root cards ──────────────────────────────────────────── */
 .root-list {
   display: flex;

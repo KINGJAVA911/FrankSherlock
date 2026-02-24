@@ -152,4 +152,73 @@ describe("Sidebar", () => {
     render(<Sidebar {...defaultProps} onFindDuplicates={undefined} />);
     expect(screen.queryByText("Find Duplicates")).not.toBeInTheDocument();
   });
+
+  it("renders Check for Updates button when onCheckUpdates is provided", () => {
+    render(<Sidebar {...defaultProps} onCheckUpdates={vi.fn()} />);
+    expect(screen.getByText("Check for Updates")).toBeInTheDocument();
+  });
+
+  it("shows 'Update to vX.Y.Z' when updateInfo is provided", () => {
+    render(
+      <Sidebar
+        {...defaultProps}
+        onCheckUpdates={vi.fn()}
+        onInstallUpdate={vi.fn()}
+        updateInfo={{ version: "0.5.0", body: null }}
+      />,
+    );
+    expect(screen.getByText("Update to v0.5.0")).toBeInTheDocument();
+  });
+
+  it("shows 'Checking...' when updateChecking is true", () => {
+    render(<Sidebar {...defaultProps} onCheckUpdates={vi.fn()} updateChecking />);
+    expect(screen.getByText("Checking...")).toBeInTheDocument();
+    expect(screen.getByText("Checking...")).toBeDisabled();
+  });
+
+  it("shows download progress when updateDownloading is true", () => {
+    render(
+      <Sidebar
+        {...defaultProps}
+        onCheckUpdates={vi.fn()}
+        updateDownloading
+        updateProgress={{ downloaded: 4500000, total: 10000000 }}
+      />,
+    );
+    expect(screen.getByText("Updating... 45%")).toBeInTheDocument();
+    expect(screen.getByText("Updating... 45%")).toBeDisabled();
+  });
+
+  it("calls onCheckUpdates when Check for Updates button is clicked", async () => {
+    const onCheckUpdates = vi.fn();
+    render(<Sidebar {...defaultProps} onCheckUpdates={onCheckUpdates} />);
+    await userEvent.click(screen.getByText("Check for Updates"));
+    expect(onCheckUpdates).toHaveBeenCalled();
+  });
+
+  it("calls onInstallUpdate when update is available and button is clicked", async () => {
+    const onInstallUpdate = vi.fn();
+    render(
+      <Sidebar
+        {...defaultProps}
+        onCheckUpdates={vi.fn()}
+        onInstallUpdate={onInstallUpdate}
+        updateInfo={{ version: "0.5.0", body: null }}
+      />,
+    );
+    await userEvent.click(screen.getByText("Update to v0.5.0"));
+    expect(onInstallUpdate).toHaveBeenCalled();
+  });
+
+  it("applies update-available CSS class when update is available", () => {
+    render(
+      <Sidebar
+        {...defaultProps}
+        onCheckUpdates={vi.fn()}
+        updateInfo={{ version: "0.5.0", body: null }}
+      />,
+    );
+    const btn = screen.getByText("Update to v0.5.0");
+    expect(btn.className).toContain("update-available");
+  });
 });

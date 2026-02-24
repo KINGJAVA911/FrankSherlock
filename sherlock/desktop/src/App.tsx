@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState, useEffect } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   addFilesToAlbum, cancelScan, copyFilesToClipboard, createAlbum, createSmartFolder,
@@ -20,6 +20,7 @@ import type {
   SmartFolder,
   SortField,
   SortOrder,
+  UpdateInfo,
 } from "./types";
 import { errorMessage } from "./utils";
 import { fileName } from "./utils/format";
@@ -94,6 +95,13 @@ export default function App() {
 
   /* ── PDF Passwords state ── */
   const [pdfPasswordsMode, setPdfPasswordsMode] = useState(false);
+
+  /* ── Auto-update state ── */
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateDownloading, setUpdateDownloading] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<{ downloaded: number; total: number | null } | null>(null);
+  const updateRef = useRef<Awaited<ReturnType<typeof import("@tauri-apps/plugin-updater").check>> | null>(null);
 
   /* ── Duplicates state ── */
   const [duplicatesMode, setDuplicatesMode] = useState(false);
@@ -688,6 +696,58 @@ export default function App() {
     }
   }
 
+  /* ── Auto-update handlers ── */
+  const checkForUpdates = useCallback(async (silent: boolean) => {
+    if (updateChecking || updateDownloading) return;
+    setUpdateChecking(true);
+    try {
+      const { check } = await import("@tauri-apps/plugin-updater");
+      const update = await check();
+      if (update) {
+        setUpdateInfo({ version: update.version, body: update.body ?? null });
+        updateRef.current = update;
+      } else if (!silent) {
+        setNotice("You're running the latest version");
+      }
+    } catch {
+      if (!silent) setError("Could not check for updates");
+    } finally {
+      setUpdateChecking(false);
+    }
+  }, [updateChecking, updateDownloading, setNotice, setError]);
+
+  const installUpdate = useCallback(async () => {
+    const update = updateRef.current;
+    if (!update || updateDownloading) return;
+    setUpdateDownloading(true);
+    setUpdateProgress(null);
+    try {
+      await update.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          setUpdateProgress({ downloaded: 0, total: event.data.contentLength ?? null });
+        } else if (event.event === "Progress") {
+          setUpdateProgress((prev) => ({
+            downloaded: (prev?.downloaded ?? 0) + event.data.chunkLength,
+            total: prev?.total ?? null,
+          }));
+        } else if (event.event === "Finished") {
+          setUpdateProgress(null);
+        }
+      });
+      const { relaunch } = await import("@tauri-apps/plugin-process");
+      await relaunch();
+    } catch (err) {
+      setError(errorMessage(err));
+      setUpdateDownloading(false);
+      setUpdateProgress(null);
+    }
+  }, [updateDownloading, setError]);
+
+  // Check for updates silently on startup
+  useEffect(() => {
+    checkForUpdates(true);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   /* ── Reorder handlers ── */
   async function handleReorderRoots(ids: number[]) {
     try {
@@ -875,6 +935,12 @@ export default function App() {
           onReorderSmartFolders={handleReorderSmartFolders}
           onFindDuplicates={handleFindDuplicates}
           onOpenPdfPasswords={() => { setPdfPasswordsMode(true); setDuplicatesMode(false); }}
+          updateInfo={updateInfo}
+          updateChecking={updateChecking}
+          updateDownloading={updateDownloading}
+          updateProgress={updateProgress}
+          onCheckUpdates={() => checkForUpdates(false)}
+          onInstallUpdate={installUpdate}
         />
 
         {pdfPasswordsMode ? (

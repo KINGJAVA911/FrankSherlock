@@ -32,6 +32,8 @@ sha2 = "0.10"
 tauri = { version = "2.10", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-log = "2"
+tauri-plugin-process = "2"
+tauri-plugin-updater = "2"
 thiserror = "2"
 ureq = { version = "3", features = ["json"] }
 image = "0.25"
