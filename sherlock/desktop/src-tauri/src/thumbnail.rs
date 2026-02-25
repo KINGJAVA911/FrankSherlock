@@ -248,6 +248,110 @@ pub fn generate_pdf_thumbnail(
     })
 }
 
+/// Generate a thumbnail for a video: extract keyframes, pick the first
+/// non-black one, resize and save as JPEG.
+pub fn generate_video_thumbnail(
+    video_path: &Path,
+    thumb_dir: &Path,
+    rel_path: &str,
+    tmp_dir: &Path,
+) -> Option<ThumbnailResult> {
+    let stem = normalize_rel_path(&Path::new(rel_path).with_extension("jpg").to_string_lossy());
+    let thumb_path = thumb_dir.join(&stem);
+
+    // Skip if thumbnail already exists and source mtime hasn't changed
+    if thumb_path.exists() {
+        let source_mtime = std::fs::metadata(video_path)
+            .ok()
+            .and_then(|m| m.modified().ok());
+        let thumb_mtime = std::fs::metadata(&thumb_path)
+            .ok()
+            .and_then(|m| m.modified().ok());
+        if let (Some(s), Some(t)) = (source_mtime, thumb_mtime) {
+            if t >= s {
+                return Some(ThumbnailResult {
+                    path: thumb_path.display().to_string(),
+                    dhash: None,
+                });
+            }
+        }
+    }
+
+    // Ensure parent directory exists
+    if let Some(parent) = thumb_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            log::warn!("Failed to create thumbnail dir {}: {e}", parent.display());
+            return None;
+        }
+    }
+
+    // Use a per-video temp subdirectory to avoid collisions
+    let video_tmp = tmp_dir.join(format!(
+        "_vidthumb_{}",
+        video_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "vid".to_string())
+    ));
+    let _ = std::fs::create_dir_all(&video_tmp);
+
+    let frames = crate::video::extract_keyframes(video_path, &video_tmp, 3);
+    if frames.is_empty() {
+        let _ = std::fs::remove_dir_all(&video_tmp);
+        return None;
+    }
+
+    // Pick the first available frame (already filtered for non-black in extract_keyframes)
+    let source_frame = &frames[0];
+    let img = match image::open(source_frame) {
+        Ok(img) => img,
+        Err(e) => {
+            log::warn!("Failed to open keyframe for thumbnail: {e}");
+            let _ = std::fs::remove_dir_all(&video_tmp);
+            return None;
+        }
+    };
+
+    let dhash = compute_dhash(&img);
+
+    let max_dim = 300u32;
+    let (w, h) = (img.width(), img.height());
+    let resized = if w > max_dim || h > max_dim {
+        let scale = max_dim as f64 / w.max(h) as f64;
+        let new_w = (w as f64 * scale).round() as u32;
+        let new_h = (h as f64 * scale).round() as u32;
+        img.resize(new_w, new_h, image::imageops::FilterType::Lanczos3)
+    } else {
+        img
+    };
+
+    let rgb = resized.to_rgb8();
+    let mut buf = std::io::Cursor::new(Vec::new());
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 80);
+    if let Err(e) = rgb.write_with_encoder(encoder) {
+        log::warn!("Failed to encode video thumbnail: {e}");
+        let _ = std::fs::remove_dir_all(&video_tmp);
+        return None;
+    }
+
+    if let Err(e) = std::fs::write(&thumb_path, buf.into_inner()) {
+        log::warn!(
+            "Failed to write video thumbnail {}: {e}",
+            thumb_path.display()
+        );
+        let _ = std::fs::remove_dir_all(&video_tmp);
+        return None;
+    }
+
+    // Clean up temp keyframes
+    let _ = std::fs::remove_dir_all(&video_tmp);
+
+    Some(ThumbnailResult {
+        path: thumb_path.display().to_string(),
+        dhash: Some(dhash),
+    })
+}
+
 /// For GIF files, extract the first frame. For other formats, return as-is.
 fn first_frame_if_gif(path: &Path) -> PathBuf {
     let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase());

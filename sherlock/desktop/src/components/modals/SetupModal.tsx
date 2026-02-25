@@ -47,6 +47,10 @@ export default function SetupModal({ setup, onRecheck, onDownload, onSetupOcr, o
             <strong>OCR (Surya)</strong>
             <p>{ocrStatusText}</p>
           </div>
+          <div>
+            <strong>Video (ffmpeg)</strong>
+            <p>{setup.ffmpegAvailable ? "Available" : "Not found"}</p>
+          </div>
         </div>
         <ul className="setup-instructions">
           {setup.instructions.map((instruction) => (

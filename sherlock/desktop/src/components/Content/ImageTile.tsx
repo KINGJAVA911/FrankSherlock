@@ -14,6 +14,7 @@ type Props = {
 
 export default function ImageTile({ item, index, isSelected, isFocused, onClick, onDoubleClick, onContextMenu }: Props) {
   const thumb = item.thumbnailPath ? convertFileSrc(item.thumbnailPath) : null;
+  const isVideo = item.mediaType === "video";
 
   return (
     <article
@@ -30,6 +31,9 @@ export default function ImageTile({ item, index, isSelected, isFocused, onClick,
           <div className="tile-thumb-placeholder">
             <span className="badge">{item.mediaType}</span>
           </div>
+        )}
+        {isVideo && (
+          <span className="tile-video-badge" aria-label="Video">&#9654;</span>
         )}
       </div>
       <div className="tile-filename">

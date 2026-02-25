@@ -19,9 +19,11 @@ use crate::models::{
 };
 use crate::platform::paths::normalize_rel_path;
 use crate::thumbnail;
+use crate::video;
 
-const SUPPORTED_EXTS: [&str; 9] = [
-    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".pdf",
+const SUPPORTED_EXTS: [&str; 20] = [
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif", ".pdf", ".mp4", ".mkv",
+    ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".ts", ".mpg", ".mpeg",
 ];
 
 /// Skip tiny images likely to be web icons, spacer GIFs, favicons, etc.
@@ -322,7 +324,14 @@ fn run_scan_job_internal(
 
                         // Regenerate thumbnail at new path if old one existed
                         let abs = Path::new(&probe.abs_path);
-                        let thumb_result = if is_pdf_file(abs) {
+                        let thumb_result = if is_video(abs) {
+                            thumbnail::generate_video_thumbnail(
+                                abs,
+                                &ctx.thumbnails_dir,
+                                &probe.rel_path,
+                                &ctx.tmp_dir,
+                            )
+                        } else if is_pdf_file(abs) {
                             thumbnail::generate_pdf_thumbnail(
                                 abs,
                                 &ctx.thumbnails_dir,
@@ -459,9 +468,14 @@ fn is_pdf_file(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
 }
 
+fn is_video(path: &Path) -> bool {
+    video::is_video_file(path)
+}
+
 fn classify_and_thumbnail(ctx: &ScanContext, probe: &FileProbe) -> ClassifyAndThumbResult {
     let abs = Path::new(&probe.abs_path);
     let is_pdf = is_pdf_file(abs);
+    let is_vid = is_video(abs);
 
     // For password-protected PDFs, try saved passwords from the DB.
     // Must run first — both classification and thumbnail need the password.
@@ -478,7 +492,14 @@ fn classify_and_thumbnail(ctx: &ScanContext, probe: &FileProbe) -> ClassifyAndTh
     let (classification, thumb_path, dhash, location_text) = std::thread::scope(|s| {
         // Spawn thumbnail + EXIF on a separate thread
         let thumb_handle = s.spawn(|| {
-            let thumb_result = if is_pdf {
+            let thumb_result = if is_vid {
+                thumbnail::generate_video_thumbnail(
+                    abs,
+                    &ctx.thumbnails_dir,
+                    &probe.rel_path,
+                    &ctx.tmp_dir,
+                )
+            } else if is_pdf {
                 thumbnail::generate_pdf_thumbnail(
                     abs,
                     &ctx.thumbnails_dir,
@@ -490,7 +511,7 @@ fn classify_and_thumbnail(ctx: &ScanContext, probe: &FileProbe) -> ClassifyAndTh
                 thumbnail::generate_thumbnail(abs, &ctx.thumbnails_dir, &probe.rel_path)
             };
 
-            let exif_location: crate::exif::ExifLocation = if is_pdf {
+            let exif_location: crate::exif::ExifLocation = if is_pdf || is_vid {
                 Default::default()
             } else {
                 crate::exif::extract_location(abs)
@@ -500,7 +521,15 @@ fn classify_and_thumbnail(ctx: &ScanContext, probe: &FileProbe) -> ClassifyAndTh
         });
 
         // LLM classification runs on the calling thread
-        let classification = if is_pdf {
+        let classification = if is_vid {
+            classify::classify_video(
+                abs,
+                &ctx.model,
+                &ctx.tmp_dir,
+                &ctx.surya_venv_dir,
+                &ctx.surya_script,
+            )
+        } else if is_pdf {
             classify::classify_pdf(
                 abs,
                 &ctx.model,
@@ -606,12 +635,15 @@ fn collect_image_probes_incremental(
         let metadata = entry.metadata().map_err(|e| {
             crate::error::AppError::Config(format!("metadata for {}: {}", path.display(), e))
         })?;
-        // Skip tiny images (icons, spacer GIFs, favicons) but not PDFs
+        // Skip tiny images (icons, spacer GIFs, favicons) but not PDFs or videos
         let ext_lower = path
             .extension()
             .map(|e| e.to_string_lossy().to_lowercase())
             .unwrap_or_default();
-        if ext_lower != "pdf" && metadata.len() < MIN_IMAGE_SIZE_BYTES {
+        if ext_lower != "pdf"
+            && !video::is_video_file(path)
+            && metadata.len() < MIN_IMAGE_SIZE_BYTES
+        {
             continue;
         }
         let rel = path
@@ -692,6 +724,13 @@ fn probe_to_record(
     fingerprint: &str,
     result: &ClassifyAndThumbResult,
 ) -> FileRecordUpsert {
+    // Extract video metadata if this is a video file
+    let video_meta = if video::is_video_file(Path::new(&probe.abs_path)) {
+        video::extract_metadata(Path::new(&probe.abs_path))
+    } else {
+        None
+    };
+
     FileRecordUpsert {
         root_id,
         rel_path: probe.rel_path.clone(),
@@ -709,6 +748,11 @@ fn probe_to_record(
         scan_marker,
         location_text: result.location_text.clone(),
         dhash: result.dhash.map(|h| h as i64),
+        duration_secs: video_meta.as_ref().and_then(|m| m.duration_secs),
+        video_width: video_meta.as_ref().and_then(|m| m.width),
+        video_height: video_meta.as_ref().and_then(|m| m.height),
+        video_codec: video_meta.as_ref().and_then(|m| m.video_codec.clone()),
+        audio_codec: video_meta.as_ref().and_then(|m| m.audio_codec.clone()),
     }
 }
 
@@ -852,6 +896,11 @@ mod tests {
             scan_marker: 1,
             location_text: String::new(),
             dhash: None,
+            duration_secs: None,
+            video_width: None,
+            video_height: None,
+            video_codec: None,
+            audio_codec: None,
         };
         db::upsert_file_record(&db_path, &rec).expect("upsert");
 
@@ -967,6 +1016,22 @@ mod tests {
         .expect("probes filtered");
         assert_eq!(probes_filtered.len(), 1);
         assert_eq!(probes_filtered[0].filename, "parent.jpg");
+    }
+
+    #[test]
+    fn supports_video_extensions() {
+        assert!(is_supported_file(Path::new("movie.mp4")));
+        assert!(is_supported_file(Path::new("show.mkv")));
+        assert!(is_supported_file(Path::new("clip.webm")));
+        assert!(is_supported_file(Path::new("cam.MOV")));
+        assert!(is_supported_file(Path::new("file.avi")));
+        assert!(is_supported_file(Path::new("file.flv")));
+        assert!(is_supported_file(Path::new("file.wmv")));
+        assert!(is_supported_file(Path::new("file.m4v")));
+        assert!(is_supported_file(Path::new("file.ts")));
+        assert!(is_supported_file(Path::new("file.mpg")));
+        assert!(is_supported_file(Path::new("file.mpeg")));
+        assert!(!is_supported_file(Path::new("file.txt")));
     }
 
     #[test]

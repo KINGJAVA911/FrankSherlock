@@ -113,6 +113,15 @@ Schema is managed by `rusqlite_migration` in `db.rs`. Migrations are tracked via
 - Test with both fresh databases and existing databases.
 - Never delete data or drop columns without explicit user consent.
 
+## Release Workflow
+
+- When tagging or retagging a version, **always update the release notes** in `releases/vX.Y.Z.md` to reflect all changes included in that tag.
+- Release notes are loaded by the release workflow and included in GitHub Releases automatically.
+- The AUR package (`frank-sherlock-bin`) is auto-published via `.github/workflows/aur-publish.yml` when a release is published.
+- **Three builds must succeed** on every release: Linux (AppImage), macOS (DMG), Windows (MSI). CI runs on all three platforms — never merge or tag if any platform is broken.
+- The AUR PKGBUILD downloads the AppImage and extracts desktop file + icons. If the Tauri `productName`, icon names, or desktop file contents change, the PKGBUILD template in `aur-publish.yml` must be updated to match.
+- AUR repo: `ssh://aur@aur.archlinux.org/frank-sherlock-bin.git` (separate from this repo, auto-managed by CI).
+
 ## What NOT to Change
 
 - Never modify files in scanned target directories.

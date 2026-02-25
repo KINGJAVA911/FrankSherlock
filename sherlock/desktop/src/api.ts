@@ -212,3 +212,9 @@ export async function retryProtectedPdfs(): Promise<RetryProtectedPdfsResult> {
 export async function reclassifyPdf(fileId: number): Promise<boolean> {
   return invoke<boolean>("reclassify_pdf", { fileId });
 }
+
+// ── Video ───────────────────────────────────────────────────────────
+
+export async function getVideoStreamUrl(absPath: string): Promise<string> {
+  return invoke<string>("get_video_stream_url", { absPath });
+}

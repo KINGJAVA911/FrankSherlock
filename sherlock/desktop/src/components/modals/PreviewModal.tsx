@@ -1,4 +1,6 @@
+import { useState, useEffect } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { getVideoStreamUrl } from "../../api";
 import type { SearchItem } from "../../types";
 import { fileName } from "../../utils/format";
 import { formatBytes } from "../../utils/format";
@@ -19,9 +21,16 @@ function isPdf(item: SearchItem): boolean {
   return /\.pdf$/i.test(item.relPath);
 }
 
+const VIDEO_EXTS = /\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|ts|mpg|mpeg)$/i;
+
+function isVideo(item: SearchItem): boolean {
+  return VIDEO_EXTS.test(item.relPath);
+}
+
 type LayoutMode =
   | "single-image"
   | "single-pdf"
+  | "single-video"
   | "image-collage"
   | "dual-pdf"
   | "pdf-plus-image";
@@ -32,9 +41,12 @@ function detectLayout(items: SearchItem[]): {
   images: SearchItem[];
 } {
   const pdfs = items.filter(isPdf).slice(0, 2);
-  const images = items.filter((i) => !isPdf(i));
+  const images = items.filter((i) => !isPdf(i) && !isVideo(i));
 
   if (items.length === 1) {
+    if (isVideo(items[0])) {
+      return { mode: "single-video", pdfs, images };
+    }
     return isPdf(items[0])
       ? { mode: "single-pdf", pdfs, images }
       : { mode: "single-image", pdfs, images };
@@ -51,6 +63,25 @@ function detectLayout(items: SearchItem[]): {
   return { mode: "image-collage", pdfs: [], images };
 }
 
+/** Resolve the best playback URL for a video file. */
+function useVideoStreamUrl(absPath: string | undefined): string | null {
+  const [url, setUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!absPath) { setUrl(null); return; }
+    let cancelled = false;
+    getVideoStreamUrl(absPath)
+      .then((u) => { if (!cancelled) setUrl(u); })
+      .catch(() => {
+        // Fallback to asset protocol (works on macOS/Windows)
+        if (!cancelled) setUrl(convertFileSrc(absPath));
+      });
+    return () => { cancelled = true; };
+  }, [absPath]);
+
+  return url;
+}
+
 export default function PreviewModal({
   previewItems,
   selectedCount,
@@ -60,6 +91,12 @@ export default function PreviewModal({
   onNavigate,
 }: Props) {
   const { mode, pdfs, images } = detectLayout(previewItems);
+  const videoItem = mode === "single-video" ? previewItems[0] : undefined;
+  const videoUrl = useVideoStreamUrl(videoItem?.absPath);
+  const [videoError, setVideoError] = useState(false);
+
+  // Reset error when navigating to a different item
+  useEffect(() => { setVideoError(false); }, [videoItem?.absPath]);
 
   return (
     <ModalOverlay className="preview-overlay" onBackdropClick={onClose}>
@@ -105,6 +142,44 @@ export default function PreviewModal({
               src={convertFileSrc(previewItems[0].absPath)}
               alt={previewItems[0].relPath}
             />
+          </div>
+        )}
+
+        {/* Single video preview */}
+        {mode === "single-video" && !videoError && videoUrl && (
+          <div className="preview-video-wrap">
+            <video
+              key={videoUrl}
+              src={videoUrl}
+              controls
+              autoPlay
+              onError={() => setVideoError(true)}
+              style={{ maxWidth: "100%", maxHeight: "80vh" }}
+            />
+          </div>
+        )}
+
+        {/* Video loading state */}
+        {mode === "single-video" && !videoError && !videoUrl && (
+          <div className="preview-video-wrap">
+            <p style={{ color: "var(--text-secondary)" }}>Loading video...</p>
+          </div>
+        )}
+
+        {/* Video error fallback: show thumbnail + message */}
+        {mode === "single-video" && videoError && (
+          <div className="preview-video-wrap preview-video-fallback">
+            {previewItems[0].thumbnailPath && (
+              <img
+                src={convertFileSrc(previewItems[0].thumbnailPath)}
+                alt={previewItems[0].relPath}
+                style={{ maxHeight: "50vh", objectFit: "contain" }}
+              />
+            )}
+            <p style={{ color: "var(--text-secondary)", marginTop: 12 }}>
+              Video playback not available. Your system may need GStreamer plugins
+              (gst-plugins-good, gst-plugins-bad, gst-libav) for codec support.
+            </p>
           </div>
         )}
 

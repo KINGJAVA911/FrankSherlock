@@ -236,6 +236,7 @@ pub struct SetupStatus {
     pub model_selection_reason: String,
     pub system_python_found: bool,
     pub venv_provision: VenvProvisionStatus,
+    pub ffmpeg_available: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -256,6 +257,11 @@ pub struct FileRecordUpsert {
     pub scan_marker: i64,
     pub location_text: String,
     pub dhash: Option<i64>,
+    pub duration_secs: Option<f64>,
+    pub video_width: Option<u32>,
+    pub video_height: Option<u32>,
+    pub video_codec: Option<String>,
+    pub audio_codec: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -286,6 +292,11 @@ pub struct FileProperties {
     pub size_bytes: i64,
     pub mtime_ns: i64,
     pub fingerprint: String,
+    pub duration_secs: Option<f64>,
+    pub video_width: Option<u32>,
+    pub video_height: Option<u32>,
+    pub video_codec: Option<String>,
+    pub audio_codec: Option<String>,
     #[serde(flatten)]
     pub exif: crate::exif::ExifDetails,
 }

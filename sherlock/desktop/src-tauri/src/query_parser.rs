@@ -63,6 +63,15 @@ pub fn parse_query(raw_query: &str) -> ParsedQuery {
         media_types.push("screenshot".to_string());
         score += 0.1;
     }
+    if lower.contains("video")
+        || lower.contains("movie")
+        || lower.contains("episode")
+        || lower.contains("film")
+        || lower.contains("tv show")
+    {
+        media_types.push("video".to_string());
+        score += 0.2;
+    }
     if lower.contains("photo") {
         media_types.push("photo".to_string());
         score += 0.1;
@@ -311,6 +320,36 @@ mod tests {
         assert!(parsed.media_types.contains(&"photo".to_string()));
         assert_eq!(parsed.date_from.as_deref(), Some("2022-01-01"));
         assert_eq!(parsed.root_hints, vec!["Camera".to_string()]);
+    }
+
+    #[test]
+    fn parses_video_media_type() {
+        let parsed = parse_query("video sunset");
+        assert!(parsed.media_types.contains(&"video".to_string()));
+    }
+
+    #[test]
+    fn parses_movie_as_video() {
+        let parsed = parse_query("movie action");
+        assert!(parsed.media_types.contains(&"video".to_string()));
+    }
+
+    #[test]
+    fn parses_episode_as_video() {
+        let parsed = parse_query("episode season 1");
+        assert!(parsed.media_types.contains(&"video".to_string()));
+    }
+
+    #[test]
+    fn parses_film_as_video() {
+        let parsed = parse_query("film noir");
+        assert!(parsed.media_types.contains(&"video".to_string()));
+    }
+
+    #[test]
+    fn parses_tv_show_as_video() {
+        let parsed = parse_query("tv show comedy");
+        assert!(parsed.media_types.contains(&"video".to_string()));
     }
 
     // -----------------------------------------------------------------------

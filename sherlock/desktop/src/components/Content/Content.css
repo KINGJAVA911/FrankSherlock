@@ -194,6 +194,20 @@
   background: var(--bg-base);
 }
 
+/* Video play badge overlay */
+.tile-video-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 0.7rem;
+  padding: 2px 5px;
+  border-radius: 3px;
+  pointer-events: none;
+  line-height: 1;
+}
+
 /* Filename bar — always visible at bottom */
 .tile-filename {
   position: absolute;

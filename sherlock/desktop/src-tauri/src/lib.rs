@@ -12,6 +12,8 @@ mod runtime;
 mod scan;
 mod similarity;
 mod thumbnail;
+mod video;
+mod video_server;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -451,9 +453,10 @@ fn get_file_properties(
     let mut props =
         db::get_file_properties(&state.paths.db_file, file_id).map_err(|e| e.to_string())?;
 
-    // Enrich with EXIF data from the actual file
+    // Enrich with EXIF data from the actual file (skip for videos)
     let path = std::path::Path::new(&props.abs_path);
-    if path.exists() {
+    let is_vid = video::is_video_file(path);
+    if path.exists() && !is_vid {
         props.exif = exif::extract_exif_details(path);
 
         // Get image dimensions (fast header-only read) if EXIF didn't have them
@@ -778,6 +781,11 @@ async fn reclassify_pdf(
     .map_err(|e| AppError::Join(e.to_string()).to_string())?
 }
 
+#[tauri::command]
+fn get_video_stream_url(abs_path: String) -> String {
+    video_server::stream_url(&abs_path)
+}
+
 fn compute_setup_status(app_state: &AppState) -> SetupStatus {
     let (model_tag, model_tier, model_reason) = llm::recommended_model(&app_state.gpu_info);
     let required_models = vec![model_tag.to_string()];
@@ -876,6 +884,13 @@ fn compute_setup_status(app_state: &AppState) -> SetupStatus {
         .expect("venv provision mutex poisoned")
         .as_view();
 
+    let ffmpeg_available = video::is_ffmpeg_available();
+    if !ffmpeg_available {
+        instructions.push(
+            "Video (optional): ffmpeg not found. Install ffmpeg for video thumbnails and classification.".to_string(),
+        );
+    }
+
     SetupStatus {
         is_ready: ollama_available && missing_models.is_empty() && download.status != "running",
         ollama_available,
@@ -891,6 +906,7 @@ fn compute_setup_status(app_state: &AppState) -> SetupStatus {
         model_selection_reason: model_reason,
         system_python_found,
         venv_provision,
+        ffmpeg_available,
     }
 }
 
@@ -1155,7 +1171,8 @@ pub fn run() {
             list_pdf_passwords,
             list_protected_pdfs,
             retry_protected_pdfs,
-            reclassify_pdf
+            reclassify_pdf,
+            get_video_stream_url
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

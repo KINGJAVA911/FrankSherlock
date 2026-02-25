@@ -55,7 +55,8 @@ jobs:
           url="https://github.com/akitaonrails/FrankSherlock"
           license=('GPL-3.0-only')
           depends=('webkit2gtk-4.1' 'hicolor-icon-theme' 'fuse2')
-          optdepends=('ollama: required for AI image classification')
+          optdepends=('ollama: required for AI image classification'
+                      'ffmpeg: required for video thumbnail extraction and metadata')
           provides=('frank-sherlock')
           conflicts=('frank-sherlock')
           options=('!strip' '!debug')

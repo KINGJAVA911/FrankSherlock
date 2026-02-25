@@ -23,6 +23,16 @@ function formatDate(mtimeNs: number): string {
   return new Date(ms).toLocaleString();
 }
 
+function formatDuration(secs: number): string {
+  const total = Math.round(secs);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m`;
+  if (m > 0) return `${m}m ${String(s).padStart(2, "0")}s`;
+  return `${s}s`;
+}
+
 function Row({ label, value }: { label: string; value: string | undefined | null; mono?: boolean }) {
   if (!value) return null;
   return (
@@ -78,6 +88,7 @@ export default function PropertiesModal({ fileId, onClose }: Props) {
 
   const hasDimensions = props && (props.imageWidth || props.imageHeight);
   const hasLocation = props && (props.gpsLocation || props.locationText);
+  const hasVideo = props && (props.durationSecs != null || props.videoCodec || props.audioCodec);
 
   return (
     <ModalOverlay onBackdropClick={onClose}>
@@ -117,6 +128,21 @@ export default function PropertiesModal({ fileId, onClose }: Props) {
                   <Row label="Dimensions" value={`${props.imageWidth} x ${props.imageHeight} px`} />
                 )}
                 <Row label="Color Space" value={props.colorSpace} />
+              </div>
+            )}
+
+            {/* Video info */}
+            {hasVideo && (
+              <div className="properties-section">
+                <div className="properties-section-title">Video</div>
+                {props.durationSecs != null && (
+                  <Row label="Duration" value={formatDuration(props.durationSecs)} />
+                )}
+                {props.videoWidth != null && props.videoHeight != null && (
+                  <Row label="Resolution" value={`${props.videoWidth} x ${props.videoHeight}`} />
+                )}
+                <Row label="Video Codec" value={props.videoCodec} />
+                <Row label="Audio Codec" value={props.audioCodec} />
               </div>
             )}
 

@@ -744,6 +744,221 @@ pub fn classify_image(
 }
 
 // ---------------------------------------------------------------------------
+// Video classification entry point
+// ---------------------------------------------------------------------------
+
+const VIDEO_PROMPT: &str = concat!(
+    "These are keyframes from a video. Analyze them and respond ONLY with valid JSON. Schema: ",
+    r#"{"media_type":"video","#,
+    r#""video_category":"movie|tv_episode|personal|music_video|tutorial|other","#,
+    r#""is_anime_related":false,"#,
+    r#""description":"short factual description","#,
+    r#""title_guess":"string or null","#,
+    r#""series_candidates":["name"],"#,
+    r#""character_candidates":["name"],"#,
+    r#""confidence":0.0}"#,
+    " Rules: ",
+    "1) Use null-like empty arrays when unknown. ",
+    "2) video_category: movie=feature film, tv_episode=TV show episode, personal=home video/vlog, ",
+    "music_video=music clip, tutorial=educational/how-to, other=everything else. ",
+    "3) title_guess: best guess at the title or null if unknown. ",
+    "4) series_candidates and character_candidates max 5 items each. ",
+    "5) Keep description under 24 words. ",
+    "6) Favor precision over guesswork.",
+);
+
+pub fn classify_video(
+    video_path: &Path,
+    model: &str,
+    tmp_dir: &Path,
+    _surya_venv: &Path,
+    _surya_script: &Path,
+) -> ClassificationResult {
+    log::info!("Classifying video: {}", video_path.display());
+
+    // Check ffmpeg availability — graceful degradation
+    if !crate::video::is_ffmpeg_available() {
+        log::info!(
+            "ffmpeg not available, skipping video classification for {}",
+            video_path.display()
+        );
+        let filename = video_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        return ClassificationResult {
+            media_type: "video".to_string(),
+            description: format!("Video file: {filename} (ffmpeg not available)"),
+            extracted_text: String::new(),
+            canonical_mentions: String::new(),
+            confidence: 0.1,
+            lang_hint: String::new(),
+        };
+    }
+
+    // Step 1: Extract metadata
+    let meta = crate::video::extract_metadata(video_path);
+    let duration_str = meta
+        .as_ref()
+        .and_then(|m| m.duration_secs)
+        .map(crate::video::format_duration)
+        .unwrap_or_else(|| "?".to_string());
+    let resolution_str = meta
+        .as_ref()
+        .and_then(|m| match (m.width, m.height) {
+            (Some(w), Some(h)) => Some(format!("{w}x{h}")),
+            _ => None,
+        })
+        .unwrap_or_else(|| "?".to_string());
+
+    // Step 2: Extract keyframes for vision classification
+    let video_tmp = tmp_dir.join(format!(
+        "_vidclass_{}",
+        video_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "vid".to_string())
+    ));
+    let _ = std::fs::create_dir_all(&video_tmp);
+    let keyframes = crate::video::extract_keyframes(video_path, &video_tmp, 5);
+
+    // Step 3: Extract subtitle text
+    let subtitle_text = crate::video::collect_subtitle_text(video_path, &video_tmp);
+
+    // Step 4: Classify keyframes with Ollama
+    let primary = if !keyframes.is_empty() {
+        // Use the best keyframe (first = least likely to be black/intro)
+        let best_frame = &keyframes[0];
+        let resp = ollama_generate(model, VIDEO_PROMPT, Some(best_frame), 500, 180, true);
+        if resp.ok {
+            parse_json_response(&resp.raw)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Build classification result
+    let video_category = primary
+        .as_ref()
+        .and_then(|p| p.get("video_category").and_then(|v| v.as_str()))
+        .unwrap_or("other")
+        .to_string();
+
+    let vision_description = primary
+        .as_ref()
+        .and_then(|p| p.get("description").and_then(|v| v.as_str()))
+        .unwrap_or("")
+        .to_string();
+
+    let title_guess = primary
+        .as_ref()
+        .and_then(|p| p.get("title_guess"))
+        .and_then(clean_nullable_str);
+
+    let confidence = primary
+        .as_ref()
+        .and_then(|p| p.get("confidence").and_then(|v| v.as_f64()))
+        .unwrap_or(0.0) as f32;
+
+    let is_anime = primary
+        .as_ref()
+        .map(should_run_anime_enrichment)
+        .unwrap_or(false);
+
+    // Build description with metadata prefix
+    let mut description = format!("[{duration_str} {resolution_str}]");
+    if let Some(ref title) = title_guess {
+        description = format!("{description} {title}:");
+    }
+    if !vision_description.is_empty() {
+        description = format!("{description} {vision_description}");
+    }
+    description = format!("{description} [{video_category}]");
+
+    // Collect canonical mentions from primary
+    let series_cands = primary
+        .as_ref()
+        .map(|p| normalize_list(p.get("series_candidates").unwrap_or(&Value::Null)))
+        .unwrap_or_default();
+    let char_cands = primary
+        .as_ref()
+        .map(|p| normalize_list(p.get("character_candidates").unwrap_or(&Value::Null)))
+        .unwrap_or_default();
+
+    let mut all_mentions: Vec<String> = Vec::new();
+
+    // Anime enrichment on the best keyframe
+    if is_anime {
+        if let Some(best_frame) = keyframes.first() {
+            if let Some(anime) = classify_anime_details(model, best_frame, &video_tmp) {
+                if let Some(series) = anime.get("series").and_then(clean_nullable_str) {
+                    description = format!("{description} [Series: {series}]");
+                }
+                let mentions =
+                    normalize_list(anime.get("canonical_mentions").unwrap_or(&Value::Null));
+                if !mentions.is_empty() {
+                    all_mentions.extend(mentions);
+                }
+                if let Some(chars) = anime.get("characters").and_then(|v| v.as_array()) {
+                    let char_names: Vec<String> = chars
+                        .iter()
+                        .filter_map(|c| {
+                            c.get("name")
+                                .and_then(|n| n.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .collect();
+                    if !char_names.is_empty() && all_mentions.is_empty() {
+                        all_mentions.extend(char_names);
+                    }
+                }
+            }
+        }
+    }
+
+    // Add series/character candidates
+    for c in series_cands.iter().chain(char_cands.iter()) {
+        let lower = c.to_lowercase();
+        if !all_mentions.iter().any(|m| m.to_lowercase() == lower) {
+            all_mentions.push(c.clone());
+        }
+    }
+    let canonical_mentions = all_mentions.join(", ");
+
+    // Cap subtitle text for extracted_text field
+    let extracted_text = if subtitle_text.len() > 4000 {
+        subtitle_text[..4000].to_string()
+    } else {
+        subtitle_text
+    };
+
+    let lang_hint = detect_lang_hint(&extracted_text);
+
+    // Clean up temp directory
+    let _ = std::fs::remove_dir_all(&video_tmp);
+
+    // If no keyframes could be classified but we have subtitle text, still decent confidence
+    let final_confidence = if confidence > 0.0 {
+        confidence
+    } else if !extracted_text.is_empty() {
+        0.5
+    } else {
+        0.2
+    };
+
+    ClassificationResult {
+        media_type: "video".to_string(),
+        description,
+        extracted_text,
+        canonical_mentions,
+        confidence: final_confidence,
+        lang_hint,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PDF classification entry point
 // ---------------------------------------------------------------------------
 

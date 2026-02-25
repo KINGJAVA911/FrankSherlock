@@ -241,6 +241,16 @@ fn run_migrations(conn: &mut Connection) -> AppResult<()> {
             );
             "#,
         ),
+        // Migration 9: Video metadata columns
+        M::up(
+            r#"
+            ALTER TABLE files ADD COLUMN duration_secs REAL;
+            ALTER TABLE files ADD COLUMN video_width INTEGER;
+            ALTER TABLE files ADD COLUMN video_height INTEGER;
+            ALTER TABLE files ADD COLUMN video_codec TEXT;
+            ALTER TABLE files ADD COLUMN audio_codec TEXT;
+            "#,
+        ),
     ]);
 
     migrations
@@ -775,12 +785,14 @@ pub fn upsert_file_record(db_path: &Path, record: &FileRecordUpsert) -> AppResul
             root_id, rel_path, filename, abs_path,
             media_type, description, extracted_text, canonical_mentions,
             confidence, lang_hint, mtime_ns, size_bytes, fingerprint,
-            scan_marker, updated_at, deleted_at, location_text, dhash
+            scan_marker, updated_at, deleted_at, location_text, dhash,
+            duration_secs, video_width, video_height, video_codec, audio_codec
         ) VALUES (
             ?1, ?2, ?3, ?4,
             ?5, ?6, ?7, ?8,
             ?9, ?10, ?11, ?12, ?13,
-            ?14, ?15, NULL, ?16, ?17
+            ?14, ?15, NULL, ?16, ?17,
+            ?18, ?19, ?20, ?21, ?22
         )
         ON CONFLICT(root_id, rel_path) DO UPDATE SET
             filename = excluded.filename,
@@ -798,7 +810,12 @@ pub fn upsert_file_record(db_path: &Path, record: &FileRecordUpsert) -> AppResul
             updated_at = excluded.updated_at,
             deleted_at = NULL,
             location_text = excluded.location_text,
-            dhash = COALESCE(excluded.dhash, files.dhash)
+            dhash = COALESCE(excluded.dhash, files.dhash),
+            duration_secs = excluded.duration_secs,
+            video_width = excluded.video_width,
+            video_height = excluded.video_height,
+            video_codec = excluded.video_codec,
+            audio_codec = excluded.audio_codec
         "#,
         params![
             record.root_id,
@@ -817,7 +834,12 @@ pub fn upsert_file_record(db_path: &Path, record: &FileRecordUpsert) -> AppResul
             record.scan_marker,
             now,
             record.location_text,
-            record.dhash
+            record.dhash,
+            record.duration_secs,
+            record.video_width,
+            record.video_height,
+            record.video_codec,
+            record.audio_codec,
         ],
     )?;
 
@@ -1294,7 +1316,8 @@ pub fn get_file_properties(db_path: &Path, file_id: i64) -> AppResult<FileProper
     conn.query_row(
         "SELECT f.id, f.filename, f.abs_path, f.rel_path, r.root_path,
                 f.media_type, f.description, f.extracted_text, f.canonical_mentions,
-                f.location_text, f.confidence, f.size_bytes, f.mtime_ns, f.fingerprint
+                f.location_text, f.confidence, f.size_bytes, f.mtime_ns, f.fingerprint,
+                f.duration_secs, f.video_width, f.video_height, f.video_codec, f.audio_codec
          FROM files f
          JOIN roots r ON f.root_id = r.id
          WHERE f.id = ?1 AND f.deleted_at IS NULL",
@@ -1315,6 +1338,11 @@ pub fn get_file_properties(db_path: &Path, file_id: i64) -> AppResult<FileProper
                 size_bytes: row.get(11)?,
                 mtime_ns: row.get(12)?,
                 fingerprint: row.get(13)?,
+                duration_secs: row.get(14)?,
+                video_width: row.get(15)?,
+                video_height: row.get(16)?,
+                video_codec: row.get(17)?,
+                audio_codec: row.get(18)?,
                 exif: Default::default(),
             })
         },
@@ -2439,6 +2467,11 @@ mod tests {
             scan_marker: 123,
             location_text: String::new(),
             dhash: None,
+            duration_secs: None,
+            video_width: None,
+            video_height: None,
+            video_codec: None,
+            audio_codec: None,
         }
     }
 
@@ -2475,6 +2508,11 @@ mod tests {
                 scan_marker: 123,
                 location_text: String::new(),
                 dhash: None,
+                duration_secs: None,
+                video_width: None,
+                video_height: None,
+                video_codec: None,
+                audio_codec: None,
             };
             upsert_file_record(&db_path, &rec).expect("upsert");
         }
@@ -2519,6 +2557,11 @@ mod tests {
             scan_marker: 123,
             location_text: String::new(),
             dhash: None,
+            duration_secs: None,
+            video_width: None,
+            video_height: None,
+            video_codec: None,
+            audio_codec: None,
         };
         upsert_file_record(&db_path, &rec).expect("upsert");
 
@@ -2556,6 +2599,11 @@ mod tests {
             scan_marker: 123,
             location_text: String::new(),
             dhash: None,
+            duration_secs: None,
+            video_width: None,
+            video_height: None,
+            video_codec: None,
+            audio_codec: None,
         };
         upsert_file_record(&db_path, &rec).expect("upsert");
 
@@ -2596,6 +2644,11 @@ mod tests {
             scan_marker: 1,
             location_text: String::new(),
             dhash: None,
+            duration_secs: None,
+            video_width: None,
+            video_height: None,
+            video_codec: None,
+            audio_codec: None,
         };
         upsert_file_record(&db_path, &rec).expect("upsert");
         touch_file_scan_marker(&db_path, root_id, "a.jpg", 2).expect("touch");
@@ -2635,6 +2688,11 @@ mod tests {
             scan_marker: 10,
             location_text: String::new(),
             dhash: None,
+            duration_secs: None,
+            video_width: None,
+            video_height: None,
+            video_codec: None,
+            audio_codec: None,
         };
         upsert_file_record(&db_path, &rec).expect("upsert");
         let files = load_existing_files(&db_path, root_id).expect("load");
@@ -2665,6 +2723,11 @@ mod tests {
             scan_marker: 5,
             location_text: String::new(),
             dhash: None,
+            duration_secs: None,
+            video_width: None,
+            video_height: None,
+            video_codec: None,
+            audio_codec: None,
         };
         upsert_file_record(&db_path, &rec).expect("upsert");
         mark_missing_as_deleted(&db_path, root_id, 99).expect("delete");
@@ -3060,6 +3123,11 @@ mod tests {
                 scan_marker: 1,
                 location_text: String::new(),
                 dhash: None,
+                duration_secs: None,
+                video_width: None,
+                video_height: None,
+                video_codec: None,
+                audio_codec: None,
             };
             upsert_file_record(db_path, &rec).expect("upsert");
         }
@@ -3126,11 +3194,11 @@ mod tests {
         init_database(&db_path).expect("init");
 
         let conn = open_conn(&db_path).expect("open");
-        // Verify user_version is set (9 migrations applied → version 9)
+        // Verify user_version is set (10 migrations applied → version 10)
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .expect("user_version");
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
 
         // Verify all tables exist
         let tables: Vec<String> = {
@@ -3172,8 +3240,8 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .expect("user_version");
-        // We have 9 migrations (indices 0..8), so user_version should be 9
-        assert_eq!(version, 9);
+        // We have 10 migrations (indices 0..9), so user_version should be 10
+        assert_eq!(version, 10);
     }
 
     #[test]
@@ -4115,6 +4183,11 @@ mod tests {
             scan_marker: 1,
             location_text: String::new(),
             dhash: None,
+            duration_secs: None,
+            video_width: None,
+            video_height: None,
+            video_codec: None,
+            audio_codec: None,
         };
         upsert_file_record(&db_path, &rec).expect("upsert");
 
@@ -4136,6 +4209,11 @@ mod tests {
             scan_marker: 1,
             location_text: String::new(),
             dhash: None,
+            duration_secs: None,
+            video_width: None,
+            video_height: None,
+            video_codec: None,
+            audio_codec: None,
         };
         upsert_file_record(&db_path, &rec2).expect("upsert");
 

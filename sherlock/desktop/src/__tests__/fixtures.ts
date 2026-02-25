@@ -13,6 +13,19 @@ export const mockSearchItem: SearchItem = {
   thumbnailPath: "/cache/thumb.jpg",
 };
 
+export const mockVideoItem: SearchItem = {
+  id: 2,
+  rootId: 1,
+  relPath: "videos/sunset.mp4",
+  absPath: "/home/user/videos/sunset.mp4",
+  mediaType: "video",
+  description: "[5m 30s 1920x1080] A beautiful sunset timelapse [personal]",
+  confidence: 0.88,
+  mtimeNs: 0,
+  sizeBytes: 104857600,
+  thumbnailPath: "/cache/thumb_video.jpg",
+};
+
 export const mockRoot: RootInfo = {
   id: 1,
   rootPath: "/home/user/photos",

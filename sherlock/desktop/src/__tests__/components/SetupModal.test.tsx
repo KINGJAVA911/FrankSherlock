@@ -19,6 +19,7 @@ const mockSetup: SetupStatus = {
   modelSelectionReason: "NVIDIA GPU (24 GiB VRAM) — 7b is optimal",
   systemPythonFound: false,
   venvProvision: { status: "idle", step: "", progressPct: 0, message: "No OCR setup in progress" },
+  ffmpegAvailable: true,
 };
 
 describe("SetupModal", () => {

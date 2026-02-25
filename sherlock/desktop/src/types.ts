@@ -118,6 +118,7 @@ export type SetupStatus = {
   modelSelectionReason: string;
   systemPythonFound: boolean;
   venvProvision: VenvProvisionStatus;
+  ffmpegAvailable: boolean;
 };
 
 export type HealthStatus = {
@@ -197,6 +198,11 @@ export type FileProperties = {
   latitude?: number | null;
   longitude?: number | null;
   gpsLocation?: string | null;
+  durationSecs?: number | null;
+  videoWidth?: number | null;
+  videoHeight?: number | null;
+  videoCodec?: string | null;
+  audioCodec?: string | null;
 };
 
 export type Album = {
