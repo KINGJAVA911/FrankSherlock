@@ -81,6 +81,7 @@ WEBKIT_DISABLE_DMABUF_RENDERER=1 GDK_BACKEND=wayland,x11 npm run tauri:dev
 - JSON parsing from LLMs uses a 3-tier fallback: direct parse -> brace-balanced extraction -> regex field salvage.
 - Thumbnails and classification caches mirror the source `rel_path` structure under their respective dirs.
 - Frontend shared utilities (`basename`, `errorMessage`) live in `src/utils.ts`. Modal CSS shares base styles via `shared-modal.css`.
+- **App.tsx is an orchestrator** — it composes hooks and renders layout. Feature-specific state and handlers must live in dedicated hooks under `src/hooks/`. New tool modes (like DuplicatesView, FacesView, PdfPasswordsView) should be self-contained components that manage their own data loading. App.tsx only holds: layout state (sidebar, modals, preview), search/filter state, and thin mode-switching coordination.
 
 ## Important Paths
 

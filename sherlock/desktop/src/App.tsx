@@ -1,27 +1,20 @@
-import { useCallback, useMemo, useRef, useState, useEffect } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  addFilesToAlbum, cancelFaceDetect, cancelScan, copyFilesToClipboard, createAlbum, createSmartFolder,
-  deleteAlbum, deleteFiles, deleteSmartFolder, detectFaces, ensureDatabase, findDuplicates,
-  getCliFolderPath, getFaceDetectStatus, getFileMetadata, listAlbums, listRoots, listSmartFolders,
-  removeRoot, renameFile, reorderAlbums, reorderRoots, reorderSmartFolders,
-  startScan, updateFileMetadata,
+  cancelScan, copyFilesToClipboard, deleteFiles, ensureDatabase,
+  getCliFolderPath, getFileMetadata, listRoots,
+  removeRoot, renameFile, reorderRoots, startScan, updateFileMetadata,
 } from "./api";
 import type {
-  Album,
   DbStats,
   DuplicateGroup,
-  DuplicatesResponse,
-  FaceDetectProgress,
   FileMetadata,
   RootInfo,
   RuntimeStatus,
   SearchItem,
   SetupStatus,
-  SmartFolder,
   SortField,
   SortOrder,
-  UpdateInfo,
 } from "./types";
 import { errorMessage } from "./utils";
 import { fileName } from "./utils/format";
@@ -57,12 +50,17 @@ import { useSearch } from "./hooks/useSearch";
 import { useScanManager } from "./hooks/useScanManager";
 import { useGridNavigation } from "./hooks/useGridNavigation";
 import { useAppInit } from "./hooks/useAppInit";
+import { useAutoUpdate } from "./hooks/useAutoUpdate";
+import { useFaceDetection } from "./hooks/useFaceDetection";
+import { useAlbumManager } from "./hooks/useAlbumManager";
+import { useSmartFolderManager } from "./hooks/useSmartFolderManager";
+import { useDuplicatesManager } from "./hooks/useDuplicatesManager";
 import "./app.css";
 
 const POLL_MS = 1200;
 
 export default function App() {
-  /* ── Shared state ── */
+  /* ── Core UI state ── */
   const [query, setQuery] = useState("");
   const [selectedMediaType, setSelectedMediaType] = useState("");
   const [sortBy, setSortBy] = useState<SortField>("dateModified");
@@ -84,16 +82,9 @@ export default function App() {
   const [showModelInfo, setShowModelInfo] = useState(false);
   const [editMetadataItem, setEditMetadataItem] = useState<SearchItem | null>(null);
   const [propertiesItem, setPropertiesItem] = useState<SearchItem | null>(null);
-  const [forceShowSetup, setForceShowSetup] = useState(false); // F10 debug toggle
+  const [forceShowSetup, setForceShowSetup] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-
-  /* ── Album & Smart Folder state ── */
-  const [albums, setAlbums] = useState<Album[]>([]);
-  const [smartFolders, setSmartFolders] = useState<SmartFolder[]>([]);
-  const [showCreateAlbum, setShowCreateAlbum] = useState(false);
-  const [showCreateSmartFolder, setShowCreateSmartFolder] = useState(false);
-  const [pendingAlbumFileIds, setPendingAlbumFileIds] = useState<number[]>([]);
-  const [activeSmartFolderId, setActiveSmartFolderId] = useState<number | null>(null);
+  const [pdfPasswordsMode, setPdfPasswordsMode] = useState(false);
 
   /* ── Directory tree: derived from query ── */
   const selectedSubdir = useMemo(() => {
@@ -101,37 +92,23 @@ export default function App() {
     return match ? (match[1] ?? match[2] ?? null) : null;
   }, [query]);
 
-  /* ── PDF Passwords state ── */
-  const [pdfPasswordsMode, setPdfPasswordsMode] = useState(false);
-
-  /* ── Faces state ── */
-  const [facesMode, setFacesMode] = useState(false);
-  const [faceProgress, setFaceProgress] = useState<FaceDetectProgress | null>(null);
-
-  /* ── Auto-update state ── */
-  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
-  const [updateChecking, setUpdateChecking] = useState(false);
-  const [updateDownloading, setUpdateDownloading] = useState(false);
-  const [updateProgress, setUpdateProgress] = useState<{ downloaded: number; total: number | null } | null>(null);
-  const updateRef = useRef<Awaited<ReturnType<typeof import("@tauri-apps/plugin-updater").check>> | null>(null);
-
-  /* ── Duplicates state ── */
-  const [duplicatesMode, setDuplicatesMode] = useState(false);
-  const [duplicatesData, setDuplicatesData] = useState<DuplicatesResponse | null>(null);
-  const [duplicatesLoading, setDuplicatesLoading] = useState(false);
-  const [duplicatesSelected, setDuplicatesSelected] = useState<Set<number>>(new Set());
-  const [nearEnabled, setNearEnabled] = useState(false);
-  const [nearThreshold, setNearThreshold] = useState(0.85);
-
   /* ── Refs ── */
   const sentinelRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
 
-  /* ── Hooks ── */
+  /* ── Toast ── */
   const { notice, error, setNotice, setError } = useToast();
   useUserConfig();
   const columnsRef = useGridColumns(gridRef);
 
+  /* ── Feature hooks ── */
+  const autoUpdate = useAutoUpdate({ onNotice: setNotice, onError: setError });
+  const faces = useFaceDetection({ pollMs: POLL_MS, onNotice: setNotice, onError: setError });
+  const albumManager = useAlbumManager({ onNotice: setNotice, onError: setError });
+  const smartFolderManager = useSmartFolderManager({ onNotice: setNotice, onError: setError });
+  const duplicates = useDuplicatesManager({ onNotice: setNotice, onError: setError });
+
+  /* ── Selection ── */
   const {
     selectedIndices, focusIndex, anchorIndex,
     selectOnly, toggleSelect, rangeSelect, selectAll, clearSelection, replaceSelection,
@@ -165,6 +142,7 @@ export default function App() {
     replaceSelection(newSelection, newFocus, newAnchor);
   }, [selectedIndices, focusIndex, anchorIndex, replaceSelection]);
 
+  /* ── Search ── */
   const {
     items, total, loading, loadingMore, canLoadMore, runSearch, onLoadMore,
   } = useSearch({
@@ -178,6 +156,7 @@ export default function App() {
     onReconcileSelection,
   });
 
+  /* ── Scan manager ── */
   const scanManager = useScanManager({
     setSetup,
     setRuntime,
@@ -191,21 +170,12 @@ export default function App() {
     itemsLength: () => items.length,
   });
 
-  /* ── Refresh helpers ── */
-  async function refreshAlbums() {
-    try { setAlbums(await listAlbums()); } catch { /* ignore */ }
-  }
-  async function refreshSmartFolders() {
-    try { setSmartFolders(await listSmartFolders()); } catch { /* ignore */ }
-  }
-
-  /* ── Extended initApp: also load albums + smart folders + CLI folder ── */
+  /* ── Init app: also load albums + smart folders + CLI folder ── */
   const initApp = useCallback(async () => {
     const result = await scanManager.initApp();
-    try { setAlbums(await listAlbums()); } catch { /* ignore */ }
-    try { setSmartFolders(await listSmartFolders()); } catch { /* ignore */ }
+    await albumManager.refreshAlbums();
+    await smartFolderManager.refreshSmartFolders();
 
-    // Handle CLI folder argument
     if (!result) return;
     const cliPath = await getCliFolderPath();
     if (!cliPath) return;
@@ -217,10 +187,7 @@ export default function App() {
     );
 
     if (matchingRoot) {
-      // Root already exists — select it
       setSelectedRootId(matchingRoot.id);
-
-      // Check for an interrupted scan on this specific root and resume it
       const interruptedForRoot = activeOrInterrupted.find(
         (s) => s.rootPath === cliPath && s.status === "interrupted",
       );
@@ -228,24 +195,11 @@ export default function App() {
         try {
           const job = await startScan(cliPath);
           scanManager.addTrackedJobId(job.id);
-        } catch { /* ignore — setup might not be ready */ }
+        } catch { /* ignore */ }
       }
     } else if (!isReadOnly && setupStatus.isReady) {
-      // New folder — check if there are already running/interrupted scans
-      const hasOtherActive = activeOrInterrupted.length > 0;
-      if (hasOtherActive) {
-        // Other scans in progress — just add root (via startScan) without
-        // blocking, but still select it. The scan will queue alongside others.
-        // Actually, if other scans are interrupted (not running), we still
-        // start the new scan — interrupted scans need user action to resume.
-        const hasRunning = activeOrInterrupted.some((s) => s.status === "running");
-        if (hasRunning) {
-          // There are running scans — defer this one. Just notify user.
-          // We can't add the root without scanning, so skip for now.
-          return;
-        }
-      }
-      // No running scans (or only interrupted ones) — start scan for new folder
+      const hasRunning = activeOrInterrupted.some((s) => s.status === "running");
+      if (hasRunning) return;
       try {
         const job = await startScan(cliPath);
         scanManager.addTrackedJobId(job.id);
@@ -253,7 +207,7 @@ export default function App() {
         const updatedRoots = await listRoots();
         const newRoot = updatedRoots.find((r) => r.rootPath === cliPath);
         if (newRoot) setSelectedRootId(newRoot.id);
-      } catch { /* ignore — setup might not be ready */ }
+      } catch { /* ignore */ }
     }
   }, [scanManager.initApp]);
 
@@ -261,18 +215,7 @@ export default function App() {
   usePolling(POLL_MS, scanManager.pollRuntimeAndScans, [scanManager.trackedJobIds]);
   useInfiniteScroll(sentinelRef, onLoadMore, [items.length, total, loadingMore]);
 
-  // Poll face detection progress
-  useEffect(() => {
-    const id = setInterval(async () => {
-      try {
-        const status = await getFaceDetectStatus();
-        setFaceProgress(status);
-      } catch { /* ignore */ }
-    }, POLL_MS);
-    return () => clearInterval(id);
-  }, []);
-
-  const hasModalOpen = !!(confirmDeleteFiles || renameItem || editMetadataItem || propertiesItem || showCreateAlbum || showCreateSmartFolder);
+  const hasModalOpen = !!(confirmDeleteFiles || renameItem || editMetadataItem || propertiesItem || albumManager.showCreateAlbum || smartFolderManager.showCreateSmartFolder);
 
   const onRequestDelete = useCallback(() => {
     const filesToDelete = [...selectedIndices].sort((a, b) => a - b)
@@ -335,19 +278,17 @@ export default function App() {
     : [];
   const singlePreviewIndex = selectedIndices.size === 1 ? [...selectedIndices][0] : null;
 
-  // Derive active album name from query (for sidebar highlight)
   const activeAlbumName = useMemo(() => {
     const match = query.match(/^album:(?:"([^"]+)"|(\S+))$/i);
     return match ? (match[1] ?? match[2] ?? null) : null;
   }, [query]);
 
-  // Derive subtitle for titlebar based on current context
   const subtitle = useMemo(() => {
-    if (facesMode) return "Faces";
+    if (faces.facesMode) return "Faces";
     if (pdfPasswordsMode) return "PDF Passwords";
-    if (duplicatesMode) return "Find Duplicates";
+    if (duplicates.duplicatesMode) return "Find Duplicates";
     if (activeAlbumName) return activeAlbumName;
-    const sf = smartFolders.find(f => f.id === activeSmartFolderId);
+    const sf = smartFolderManager.smartFolders.find(f => f.id === smartFolderManager.activeSmartFolderId);
     if (sf) return sf.name;
     if (selectedRootId != null) {
       const root = roots.find(r => r.id === selectedRootId);
@@ -356,7 +297,26 @@ export default function App() {
       }
     }
     return null;
-  }, [facesMode, duplicatesMode, activeAlbumName, activeSmartFolderId, smartFolders, selectedRootId, roots, selectedSubdir, pdfPasswordsMode]);
+  }, [faces.facesMode, duplicates.duplicatesMode, activeAlbumName, smartFolderManager.activeSmartFolderId, smartFolderManager.smartFolders, selectedRootId, roots, selectedSubdir, pdfPasswordsMode]);
+
+  /* ── Mode switching coordination ── */
+  function enterDuplicatesMode(threshold?: number | null) {
+    setPdfPasswordsMode(false);
+    faces.setFacesMode(false);
+    duplicates.onFindDuplicates(threshold);
+  }
+
+  function enterFacesMode() {
+    faces.setFacesMode(true);
+    duplicates.setDuplicatesMode(false);
+    setPdfPasswordsMode(false);
+  }
+
+  function enterPdfPasswordsMode() {
+    setPdfPasswordsMode(true);
+    duplicates.setDuplicatesMode(false);
+    faces.setFacesMode(false);
+  }
 
   /* ── Handlers ── */
   function onWindowClose() {
@@ -367,7 +327,6 @@ export default function App() {
     if (readOnly) return;
     setConfirmDeleteRoot(null);
     try {
-      // Cancel any running scans for this root before removing
       const runningForRoot = scanManager.activeScans.filter(
         (s) => s.rootId === root.id && s.status === "running",
       );
@@ -409,7 +368,6 @@ export default function App() {
     if (!selectedIndices.has(idx)) selectOnly(idx);
     setContextMenu({ x: e.clientX, y: e.clientY });
 
-    // For single selection, fetch metadata (description + OCR text) for context menu
     const effectiveSelection = selectedIndices.has(idx) ? selectedIndices : new Set([idx]);
     if (effectiveSelection.size === 1) {
       const item = items[idx];
@@ -492,13 +450,8 @@ export default function App() {
       if (result.errors.length > 0) {
         setError(`Some files had errors: ${result.errors[0]}`);
       }
-      // Refresh duplicates view if active
-      if (duplicatesMode) {
-        setDuplicatesSelected(new Set());
-        try {
-          const resp = await findDuplicates([], nearEnabled ? nearThreshold : null);
-          setDuplicatesData(resp);
-        } catch { /* ignore */ }
+      if (duplicates.duplicatesMode) {
+        await duplicates.refreshAfterDelete();
       }
     } catch (err) {
       setError(errorMessage(err));
@@ -537,160 +490,22 @@ export default function App() {
     }
   }
 
-  /* ── Duplicates handlers ── */
-  async function handleFindDuplicates(threshold?: number | null) {
-    setPdfPasswordsMode(false);
-    setFacesMode(false);
-    setDuplicatesMode(true);
-    setDuplicatesLoading(true);
-    setDuplicatesSelected(new Set());
-    setDuplicatesData(null);
-    try {
-      // Guard: when called as an onClick handler, the first arg is a MouseEvent
-      const safeThreshold = typeof threshold === "number" ? threshold : null;
-      const effectiveThreshold = safeThreshold ?? (nearEnabled ? nearThreshold : null);
-      const resp = await findDuplicates([], effectiveThreshold);
-      setDuplicatesData(resp);
-    } catch (err) {
-      setError(errorMessage(err));
-      setDuplicatesMode(false);
-    } finally {
-      setDuplicatesLoading(false);
-    }
-  }
-
-  /* ── Face detection handler ── */
-  async function handleDetectFaces(root: RootInfo) {
-    try {
-      await detectFaces(root.id);
-      setNotice(`Face detection started for "${root.rootName}"`);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
-  }
-
-  async function handleCancelFaceDetect() {
-    try {
-      await cancelFaceDetect();
-    } catch (err) {
-      setError(errorMessage(err));
-    }
-  }
-
-  function handleDuplicatesToggleFile(fileId: number) {
-    setDuplicatesSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(fileId)) next.delete(fileId);
-      else next.add(fileId);
-      return next;
-    });
-  }
-
-  function handleDuplicatesSelectAll() {
-    if (!duplicatesData) return;
-    const ids = new Set<number>();
-    for (const group of duplicatesData.groups) {
-      for (const file of group.files) {
-        if (!file.isKeeper) ids.add(file.id);
-      }
-    }
-    setDuplicatesSelected(ids);
-  }
-
-  function handleDuplicatesSelectGroup(group: DuplicateGroup) {
-    setDuplicatesSelected((prev) => {
-      const next = new Set(prev);
-      for (const file of group.files) {
-        if (!file.isKeeper) next.add(file.id);
-      }
-      return next;
-    });
-  }
-
-  function handleDuplicatesPreviewGroup(group: DuplicateGroup) {
-    // Convert all group files (up to 10) to SearchItem[] for PreviewModal
-    const items: SearchItem[] = group.files.slice(0, 10).map((file) => ({
-      id: file.id,
-      rootId: file.rootId,
-      relPath: file.relPath,
-      absPath: file.absPath,
-      mediaType: file.mediaType,
-      description: file.description,
-      confidence: file.confidence,
-      mtimeNs: file.mtimeNs,
-      sizeBytes: file.sizeBytes,
-      thumbnailPath: file.thumbnailPath,
-    }));
-    setConfirmDeleteFiles(null);
-    setPreviewOpen(false);
-    setDupPreviewItems(items);
-  }
-
-  const [dupPreviewItems, setDupPreviewItems] = useState<SearchItem[]>([]);
-
-  function handleDuplicatesDeleteSelected() {
-    if (!duplicatesData || duplicatesSelected.size === 0) return;
-    const filesToDelete: SearchItem[] = [];
-    for (const group of duplicatesData.groups) {
-      for (const file of group.files) {
-        if (duplicatesSelected.has(file.id)) {
-          filesToDelete.push({
-            id: file.id,
-            rootId: file.rootId,
-            relPath: file.relPath,
-            absPath: file.absPath,
-            mediaType: file.mediaType,
-            description: file.description,
-            confidence: file.confidence,
-            mtimeNs: file.mtimeNs,
-            sizeBytes: file.sizeBytes,
-            thumbnailPath: file.thumbnailPath,
-          });
-        }
-      }
-    }
-    if (filesToDelete.length > 0) setConfirmDeleteFiles(filesToDelete);
-  }
-
-  function handleDuplicatesBack() {
-    setDuplicatesMode(false);
-    setDuplicatesData(null);
-    setDuplicatesSelected(new Set());
-  }
-
-  /* ── Album handlers ── */
-  function handleSelectAlbum(album: Album) {
-    const q = album.name.includes(" ") ? `album:"${album.name}"` : `album:${album.name}`;
+  /* ── Album handler wrappers (coordinate mode switching) ── */
+  function handleSelectAlbum(album: typeof albumManager.albums[number]) {
+    const { query: q } = albumManager.onSelectAlbum(album);
     setQuery(q);
-    setActiveSmartFolderId(null);
-    setDuplicatesMode(false);
+    smartFolderManager.setActiveSmartFolderId(null);
+    duplicates.setDuplicatesMode(false);
     setPdfPasswordsMode(false);
-    setFacesMode(false);
+    faces.setFacesMode(false);
   }
 
-  async function handleDeleteAlbum(album: Album) {
-    try {
-      await deleteAlbum(album.id);
-      await refreshAlbums();
-      setNotice(`Deleted album "${album.name}"`);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
-  }
-
-  async function handleAddToAlbum(albumId: number) {
+  function handleAddToAlbum(albumId: number) {
     setContextMenu(null);
     const fileIds = [...selectedIndices].sort((a, b) => a - b)
       .filter(i => i < items.length)
       .map(i => items[i].id);
-    if (fileIds.length === 0) return;
-    try {
-      const added = await addFilesToAlbum(albumId, fileIds);
-      await refreshAlbums();
-      setNotice(`Added ${added} file(s) to album`);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
+    albumManager.onAddToAlbum(albumId, fileIds);
   }
 
   function handleCreateAlbumFromSelection() {
@@ -698,132 +513,39 @@ export default function App() {
     const fileIds = [...selectedIndices].sort((a, b) => a - b)
       .filter(i => i < items.length)
       .map(i => items[i].id);
-    setPendingAlbumFileIds(fileIds);
-    setShowCreateAlbum(true);
+    albumManager.onCreateAlbumFromSelection(fileIds);
   }
 
-  async function handleCreateAlbumConfirm(name: string) {
-    setShowCreateAlbum(false);
-    try {
-      const album = await createAlbum(name);
-      if (pendingAlbumFileIds.length > 0) {
-        await addFilesToAlbum(album.id, pendingAlbumFileIds);
-      }
-      setPendingAlbumFileIds([]);
-      await refreshAlbums();
-      setNotice(`Created album "${name}"${pendingAlbumFileIds.length > 0 ? ` with ${pendingAlbumFileIds.length} file(s)` : ""}`);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
-  }
-
-  /* ── Smart Folder handlers ── */
-  function handleSelectSmartFolder(folder: SmartFolder) {
-    setQuery(folder.query);
-    setActiveSmartFolderId(folder.id);
-    setDuplicatesMode(false);
+  /* ── Smart folder handler wrappers (coordinate mode switching) ── */
+  function handleSelectSmartFolder(folder: typeof smartFolderManager.smartFolders[number]) {
+    const { query: q } = smartFolderManager.onSelectSmartFolder(folder);
+    setQuery(q);
+    duplicates.setDuplicatesMode(false);
     setPdfPasswordsMode(false);
-    setFacesMode(false);
+    faces.setFacesMode(false);
   }
 
-  async function handleDeleteSmartFolder(folder: SmartFolder) {
-    try {
-      await deleteSmartFolder(folder.id);
-      await refreshSmartFolders();
-      if (activeSmartFolderId === folder.id) setActiveSmartFolderId(null);
-      setNotice(`Deleted smart folder "${folder.name}"`);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
+  function handleCreateSmartFolderConfirm(name: string) {
+    smartFolderManager.onCreateSmartFolderConfirm(name, query);
   }
 
-  async function handleCreateSmartFolderConfirm(name: string) {
-    setShowCreateSmartFolder(false);
-    try {
-      const folder = await createSmartFolder(name, query);
-      await refreshSmartFolders();
-      setActiveSmartFolderId(folder.id);
-      setNotice(`Saved smart folder "${name}"`);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
+  /* ── Duplicates handler wrappers ── */
+  function handleDuplicatesDeleteSelected() {
+    const filesToDelete = duplicates.getDeleteSearchItems();
+    if (filesToDelete.length > 0) setConfirmDeleteFiles(filesToDelete);
   }
 
-  /* ── Auto-update handlers ── */
-  const checkForUpdates = useCallback(async (silent: boolean) => {
-    if (updateChecking || updateDownloading) return;
-    setUpdateChecking(true);
-    try {
-      const { check } = await import("@tauri-apps/plugin-updater");
-      const update = await check();
-      if (update) {
-        setUpdateInfo({ version: update.version, body: update.body ?? null });
-        updateRef.current = update;
-      } else if (!silent) {
-        setNotice("You're running the latest version");
-      }
-    } catch {
-      if (!silent) setError("Could not check for updates");
-    } finally {
-      setUpdateChecking(false);
-    }
-  }, [updateChecking, updateDownloading, setNotice, setError]);
-
-  const installUpdate = useCallback(async () => {
-    const update = updateRef.current;
-    if (!update || updateDownloading) return;
-    setUpdateDownloading(true);
-    setUpdateProgress(null);
-    try {
-      await update.downloadAndInstall((event) => {
-        if (event.event === "Started") {
-          setUpdateProgress({ downloaded: 0, total: event.data.contentLength ?? null });
-        } else if (event.event === "Progress") {
-          setUpdateProgress((prev) => ({
-            downloaded: (prev?.downloaded ?? 0) + event.data.chunkLength,
-            total: prev?.total ?? null,
-          }));
-        } else if (event.event === "Finished") {
-          setUpdateProgress(null);
-        }
-      });
-      const { relaunch } = await import("@tauri-apps/plugin-process");
-      await relaunch();
-    } catch (err) {
-      setError(errorMessage(err));
-      setUpdateDownloading(false);
-      setUpdateProgress(null);
-    }
-  }, [updateDownloading, setError]);
-
-  // Check for updates silently on startup
-  useEffect(() => {
-    checkForUpdates(true);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  function handleDuplicatesPreviewGroup(group: DuplicateGroup) {
+    setConfirmDeleteFiles(null);
+    setPreviewOpen(false);
+    duplicates.onPreviewGroup(group);
+  }
 
   /* ── Reorder handlers ── */
   async function handleReorderRoots(ids: number[]) {
     try {
       await reorderRoots(ids);
       await scanManager.refreshRoots();
-    } catch (err) {
-      setError(errorMessage(err));
-    }
-  }
-
-  async function handleReorderAlbums(ids: number[]) {
-    try {
-      await reorderAlbums(ids);
-      await refreshAlbums();
-    } catch (err) {
-      setError(errorMessage(err));
-    }
-  }
-
-  async function handleReorderSmartFolders(ids: number[]) {
-    try {
-      await reorderSmartFolders(ids);
-      await refreshSmartFolders();
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -856,13 +578,13 @@ export default function App() {
           onNavigate={(idx) => { selectOnly(idx); }}
         />
       )}
-      {dupPreviewItems.length > 0 && (
+      {duplicates.dupPreviewItems.length > 0 && (
         <PreviewModal
-          previewItems={dupPreviewItems}
-          selectedCount={dupPreviewItems.length}
+          previewItems={duplicates.dupPreviewItems}
+          selectedCount={duplicates.dupPreviewItems.length}
           singlePreviewIndex={null}
-          totalItems={dupPreviewItems.length}
-          onClose={() => setDupPreviewItems([])}
+          totalItems={duplicates.dupPreviewItems.length}
+          onClose={() => duplicates.setDupPreviewItems([])}
           onNavigate={() => {}}
         />
       )}
@@ -899,7 +621,7 @@ export default function App() {
           x={contextMenu.x}
           y={contextMenu.y}
           selectedCount={selectedIndices.size}
-          albums={albums}
+          albums={albumManager.albums}
           description={contextMenuMeta?.description ?? null}
           extractedText={contextMenuMeta?.extractedText ?? null}
           confidence={selectedIndices.size === 1 ? (items[[...selectedIndices][0]]?.confidence ?? null) : null}
@@ -928,16 +650,16 @@ export default function App() {
           onClose={() => setPropertiesItem(null)}
         />
       )}
-      {showCreateAlbum && (
+      {albumManager.showCreateAlbum && (
         <CreateAlbumModal
-          onCancel={() => { setShowCreateAlbum(false); setPendingAlbumFileIds([]); }}
-          onConfirm={handleCreateAlbumConfirm}
+          onCancel={albumManager.closeCreateModal}
+          onConfirm={albumManager.onCreateAlbumConfirm}
         />
       )}
-      {showCreateSmartFolder && (
+      {smartFolderManager.showCreateSmartFolder && (
         <CreateSmartFolderModal
           query={query}
-          onCancel={() => setShowCreateSmartFolder(false)}
+          onCancel={smartFolderManager.closeCreateModal}
           onConfirm={handleCreateSmartFolderConfirm}
         />
       )}
@@ -966,10 +688,10 @@ export default function App() {
           dbStats={dbStats}
           readOnly={readOnly}
           setupReady={setup ? setup.isReady : false}
-          albums={albums}
-          smartFolders={smartFolders}
+          albums={albumManager.albums}
+          smartFolders={smartFolderManager.smartFolders}
           activeAlbumName={activeAlbumName}
-          activeSmartFolderId={activeSmartFolderId}
+          activeSmartFolderId={smartFolderManager.activeSmartFolderId}
           selectedSubdir={selectedSubdir}
           onSelectSubdir={(subdir) => {
             setQuery((q) => {
@@ -978,14 +700,14 @@ export default function App() {
               const prefix = subdir.includes(" ") ? `subdir:"${subdir}"` : `subdir:${subdir}`;
               return cleaned ? `${prefix} ${cleaned}` : prefix;
             });
-            setActiveSmartFolderId(null);
+            smartFolderManager.setActiveSmartFolderId(null);
           }}
           onSelectRoot={(id) => {
             setSelectedRootId(id);
             setQuery((q) => q.replace(/\bsubdir:(?:"[^"]*?"|\S+)\s*/i, "").trim());
-            setDuplicatesMode(false);
+            duplicates.setDuplicatesMode(false);
             setPdfPasswordsMode(false);
-            setFacesMode(false);
+            faces.setFacesMode(false);
           }}
           onDeleteRoot={(root) => setConfirmDeleteRoot(root)}
           onRescanRoot={(root) => scanManager.onRescanRoot(root, setup, readOnly)}
@@ -998,39 +720,37 @@ export default function App() {
           onCancelScan={(scan) => scanManager.onCancelScan(scan, readOnly)}
           onResumeScan={(scan) => scanManager.onResumeScan(scan, readOnly)}
           onSelectAlbum={handleSelectAlbum}
-          onDeleteAlbum={handleDeleteAlbum}
+          onDeleteAlbum={albumManager.onDeleteAlbum}
           onSelectSmartFolder={handleSelectSmartFolder}
-          onDeleteSmartFolder={handleDeleteSmartFolder}
+          onDeleteSmartFolder={smartFolderManager.onDeleteSmartFolder}
           onReorderRoots={handleReorderRoots}
-          onReorderAlbums={handleReorderAlbums}
-          onReorderSmartFolders={handleReorderSmartFolders}
-          faceProgress={faceProgress}
-          onDetectFaces={handleDetectFaces}
-          onCancelFaceDetect={handleCancelFaceDetect}
-          onFindDuplicates={handleFindDuplicates}
-          onOpenPdfPasswords={() => { setPdfPasswordsMode(true); setDuplicatesMode(false); setFacesMode(false); }}
-          onOpenFaces={() => { setFacesMode(true); setDuplicatesMode(false); setPdfPasswordsMode(false); }}
-          updateInfo={updateInfo}
-          updateChecking={updateChecking}
-          updateDownloading={updateDownloading}
-          updateProgress={updateProgress}
-          onCheckUpdates={() => checkForUpdates(false)}
-          onInstallUpdate={installUpdate}
+          onReorderAlbums={albumManager.onReorderAlbums}
+          onReorderSmartFolders={smartFolderManager.onReorderSmartFolders}
+          faceProgress={faces.faceProgress}
+          onDetectFaces={faces.onDetectFaces}
+          onCancelFaceDetect={faces.onCancelFaceDetect}
+          onFindDuplicates={enterDuplicatesMode}
+          onOpenPdfPasswords={enterPdfPasswordsMode}
+          onOpenFaces={enterFacesMode}
+          updateInfo={autoUpdate.updateInfo}
+          updateChecking={autoUpdate.updateChecking}
+          updateDownloading={autoUpdate.updateDownloading}
+          updateProgress={autoUpdate.updateProgress}
+          onCheckUpdates={() => autoUpdate.checkForUpdates(false)}
+          onInstallUpdate={autoUpdate.installUpdate}
         />
 
-        {facesMode ? (
+        {faces.facesMode ? (
           <FacesView
-            onBack={() => setFacesMode(false)}
+            onBack={() => faces.setFacesMode(false)}
             onPreview={(item) => {
-              // Preview a single face item
               clearSelection();
               const idx = items.findIndex((i) => i.id === item.id);
               if (idx >= 0) {
                 selectOnly(idx);
                 setPreviewOpen(true);
               } else {
-                // Item not in current search results — use dup preview trick
-                setDupPreviewItems([item]);
+                duplicates.setDupPreviewItems([item]);
               }
             }}
           />
@@ -1040,33 +760,27 @@ export default function App() {
             onNotice={setNotice}
             onError={setError}
           />
-        ) : duplicatesMode && duplicatesData ? (
+        ) : duplicates.duplicatesMode && duplicates.duplicatesData ? (
           <DuplicatesView
-            data={duplicatesData}
-            loading={duplicatesLoading}
-            selected={duplicatesSelected}
-            nearEnabled={nearEnabled}
-            nearThreshold={nearThreshold}
-            onNearEnabledChange={(enabled) => {
-              setNearEnabled(enabled);
-              handleFindDuplicates(enabled ? nearThreshold : null);
-            }}
-            onNearThresholdChange={(value) => {
-              setNearThreshold(value);
-              handleFindDuplicates(value);
-            }}
-            onToggleFile={handleDuplicatesToggleFile}
-            onSelectAllDuplicates={handleDuplicatesSelectAll}
-            onDeselectAll={() => setDuplicatesSelected(new Set())}
+            data={duplicates.duplicatesData}
+            loading={duplicates.duplicatesLoading}
+            selected={duplicates.duplicatesSelected}
+            nearEnabled={duplicates.nearEnabled}
+            nearThreshold={duplicates.nearThreshold}
+            onNearEnabledChange={duplicates.onNearEnabledChange}
+            onNearThresholdChange={duplicates.onNearThresholdChange}
+            onToggleFile={duplicates.onToggleFile}
+            onSelectAllDuplicates={duplicates.onSelectAllDuplicates}
+            onDeselectAll={duplicates.onDeselectAll}
             onDeleteSelected={handleDuplicatesDeleteSelected}
-            onBack={handleDuplicatesBack}
-            onSelectGroupDuplicates={handleDuplicatesSelectGroup}
+            onBack={duplicates.onBack}
+            onSelectGroupDuplicates={duplicates.onSelectGroupDuplicates}
             onPreviewGroup={handleDuplicatesPreviewGroup}
           />
         ) : (
           <Content
             query={query}
-            onQueryChange={(q) => { setQuery(q); setActiveSmartFolderId(null); }}
+            onQueryChange={(q) => { setQuery(q); smartFolderManager.setActiveSmartFolderId(null); }}
             selectedMediaType={selectedMediaType}
             onMediaTypeChange={setSelectedMediaType}
             mediaTypeOptions={mediaTypeOptions}
@@ -1075,7 +789,7 @@ export default function App() {
             sortOrder={sortOrder}
             onSortOrderChange={setSortOrder}
             hasTextQuery={query.trim().length > 0}
-            onSaveSmartFolder={() => setShowCreateSmartFolder(true)}
+            onSaveSmartFolder={smartFolderManager.openCreateModal}
             items={items}
             total={total}
             loading={loading}
