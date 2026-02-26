@@ -2625,8 +2625,10 @@ pub fn list_persons(
     for row in rows {
         let (id, name, face_count, rep_face_id) = row?;
 
-        // Get crop_path and thumbnail_path from representative face
-        let (crop_path, thumbnail_path) = if let Some(face_id) = rep_face_id {
+        // Get crop_path from representative face.
+        // If rep face has no crop, try to find ANY face in this person with a crop.
+        // Never fall back to file thumbnail — showing a group photo as a face card is misleading.
+        let crop_path = if let Some(face_id) = rep_face_id {
             let crop: Option<String> = conn
                 .query_row(
                     "SELECT crop_path FROM face_detections WHERE id = ?1",
@@ -2635,21 +2637,24 @@ pub fn list_persons(
                 )
                 .ok()
                 .flatten();
-            // Get the thumbnail of the file this face belongs to
-            let thumb: Option<String> = conn
-                .query_row(
-                    "SELECT f.thumb_path FROM face_detections fd
-                     JOIN files f ON f.id = fd.file_id
-                     WHERE fd.id = ?1",
-                    params![face_id],
+            // If representative has no crop, find any face in this person with one
+            if crop.is_some() {
+                crop
+            } else {
+                conn.query_row(
+                    "SELECT crop_path FROM face_detections
+                     WHERE person_id = ?1 AND crop_path IS NOT NULL
+                     ORDER BY confidence DESC LIMIT 1",
+                    params![id],
                     |r| r.get(0),
                 )
                 .ok()
-                .flatten();
-            (crop, thumb)
+                .flatten()
+            }
         } else {
-            (None, None)
+            None
         };
+        let thumbnail_path = None;
 
         persons.push(crate::models::PersonInfo {
             id,
@@ -2669,6 +2674,92 @@ pub fn rename_person(db_path: &Path, person_id: i64, new_name: &str) -> AppResul
         "UPDATE people SET name = ?1 WHERE id = ?2",
         params![new_name, person_id],
     )?;
+    Ok(())
+}
+
+pub fn list_faces_for_person(
+    db_path: &Path,
+    person_id: i64,
+) -> AppResult<Vec<crate::models::FaceInfo>> {
+    let conn = open_conn(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT fd.id, fd.person_id, fd.file_id, f.rel_path, fd.confidence, fd.crop_path
+         FROM face_detections fd
+         JOIN files f ON f.id = fd.file_id
+         WHERE fd.person_id = ?1
+         ORDER BY fd.confidence DESC",
+    )?;
+    let faces = stmt
+        .query_map(params![person_id], |row| {
+            let rel_path: String = row.get(3)?;
+            let filename = crate::platform::paths::rel_path_filename(&rel_path).to_string();
+            Ok(crate::models::FaceInfo {
+                id: row.get(0)?,
+                person_id: row.get(1)?,
+                file_id: row.get(2)?,
+                rel_path,
+                filename,
+                confidence: row.get(4)?,
+                crop_path: row.get(5)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(faces)
+}
+
+pub fn unassign_face_from_person(db_path: &Path, face_id: i64) -> AppResult<()> {
+    let conn = open_conn(db_path)?;
+
+    // Get current person_id and check if this face is the representative
+    let (person_id, is_representative): (Option<i64>, bool) = conn
+        .query_row(
+            "SELECT fd.person_id,
+                    COALESCE(fd.person_id IS NOT NULL
+                        AND EXISTS(SELECT 1 FROM people p
+                                   WHERE p.id = fd.person_id
+                                     AND p.representative_face_id = fd.id), 0)
+             FROM face_detections fd WHERE fd.id = ?1",
+            params![face_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|_| AppError::InvalidPath(format!("Face {face_id} not found")))?;
+
+    let Some(pid) = person_id else {
+        return Ok(()); // Already unassigned
+    };
+
+    // Unassign the face
+    conn.execute(
+        "UPDATE face_detections SET person_id = NULL WHERE id = ?1",
+        params![face_id],
+    )?;
+
+    // Check if person still has faces
+    let remaining: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM face_detections WHERE person_id = ?1",
+        params![pid],
+        |row| row.get(0),
+    )?;
+
+    if remaining == 0 {
+        // Delete person if no faces remain
+        conn.execute("DELETE FROM people WHERE id = ?1", params![pid])?;
+    } else if is_representative {
+        // Update representative to next best face with crop
+        conn.execute(
+            "UPDATE people SET representative_face_id = COALESCE(
+                (SELECT fd.id FROM face_detections fd
+                 WHERE fd.person_id = ?1 AND fd.crop_path IS NOT NULL
+                 ORDER BY fd.confidence DESC LIMIT 1),
+                (SELECT fd.id FROM face_detections fd
+                 WHERE fd.person_id = ?1
+                 ORDER BY fd.confidence DESC LIMIT 1)
+            ) WHERE id = ?1",
+            params![pid],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -2695,81 +2786,121 @@ pub fn merge_persons(db_path: &Path, source_id: i64, target_id: i64) -> AppResul
 
 // ── Face clustering ─────────────────────────────────────────────────
 
+fn l2_normalize(v: &mut [f32]) {
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-10);
+    for x in v.iter_mut() {
+        *x /= norm;
+    }
+}
+
+fn compute_centroid(embeddings: &[Vec<f32>]) -> Vec<f32> {
+    if embeddings.is_empty() {
+        return Vec::new();
+    }
+    let dim = embeddings[0].len();
+    let mut mean = vec![0.0f32; dim];
+    for emb in embeddings {
+        for (i, v) in emb.iter().enumerate() {
+            mean[i] += v;
+        }
+    }
+    let n = embeddings.len() as f32;
+    for v in &mut mean {
+        *v /= n;
+    }
+    l2_normalize(&mut mean);
+    mean
+}
+
 pub fn cluster_faces(db_path: &Path, threshold: f32) -> AppResult<crate::models::ClusterResult> {
     let conn = open_conn(db_path)?;
     let now = now_epoch_secs();
 
-    // Load unassigned faces
-    let mut stmt =
-        conn.prepare("SELECT id, embedding FROM face_detections WHERE person_id IS NULL")?;
-    struct UnassignedFace {
+    const MIN_CONFIDENCE: f32 = 0.65;
+    const MIN_BBOX_DIM: f32 = 40.0;
+
+    // ── Single load: all qualifying face embeddings ──
+    // Load once, reference throughout assignment, merge, and outlier phases.
+    struct FaceRecord {
         id: i64,
         embedding: Vec<f32>,
+        file_id: i64,
+        person_id: Option<i64>,
     }
-    let unassigned: Vec<UnassignedFace> = stmt
-        .query_map([], |row| {
+    let mut all_faces: Vec<FaceRecord> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, embedding, file_id, person_id FROM face_detections
+             WHERE confidence >= ?1 AND bbox_w >= ?2 AND bbox_h >= ?2",
+        )?;
+        let rows = stmt.query_map(params![MIN_CONFIDENCE, MIN_BBOX_DIM], |row| {
             let blob: Vec<u8> = row.get(1)?;
-            Ok(UnassignedFace {
+            Ok(FaceRecord {
                 id: row.get(0)?,
                 embedding: crate::face::blob_to_embedding(&blob),
+                file_id: row.get(2)?,
+                person_id: row.get(3)?,
             })
-        })?
-        .filter_map(|r| r.ok())
+        })?;
+        let result: Vec<FaceRecord> = rows.filter_map(|r| r.ok()).collect();
+        result
+    };
+
+    // Build an index: face_id → position in all_faces
+    let face_idx: std::collections::HashMap<i64, usize> = all_faces
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.id, i))
         .collect();
 
-    if unassigned.is_empty() {
-        return Ok(crate::models::ClusterResult {
-            new_persons: 0,
-            assigned_faces: 0,
-        });
+    // Partition into unassigned face ids
+    let unassigned_ids: Vec<i64> = all_faces
+        .iter()
+        .filter(|f| f.person_id.is_none())
+        .map(|f| f.id)
+        .collect();
+
+    if unassigned_ids.is_empty() {
+        // Skip to merge+outlier passes (existing persons may need cleanup)
+        // but if there are no persons either, return early
+        let has_persons: bool = all_faces.iter().any(|f| f.person_id.is_some());
+        if !has_persons {
+            return Ok(crate::models::ClusterResult {
+                new_persons: 0,
+                assigned_faces: 0,
+            });
+        }
     }
 
-    // Load existing person centroids (mean embedding per person)
+    // ── Build centroids from existing persons (in-memory) ──
     struct PersonCentroid {
         person_id: i64,
         centroid: Vec<f32>,
+        count: usize,
+        file_ids: std::collections::HashSet<i64>,
     }
-    let person_ids: Vec<i64> = {
-        let mut stmt = conn.prepare("SELECT id FROM people")?;
-        let ids: Vec<i64> = stmt
-            .query_map([], |row| row.get(0))?
-            .filter_map(|r| r.ok())
-            .collect();
-        ids
-    };
+
+    let mut person_face_map: std::collections::HashMap<i64, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (idx, f) in all_faces.iter().enumerate() {
+        if let Some(pid) = f.person_id {
+            person_face_map.entry(pid).or_default().push(idx);
+        }
+    }
 
     let mut centroids: Vec<PersonCentroid> = Vec::new();
-    for pid in &person_ids {
-        let mut emb_stmt =
-            conn.prepare("SELECT embedding FROM face_detections WHERE person_id = ?1")?;
-        let embeddings: Vec<Vec<f32>> = emb_stmt
-            .query_map(params![pid], |row| {
-                let blob: Vec<u8> = row.get(0)?;
-                Ok(crate::face::blob_to_embedding(&blob))
-            })?
-            .filter_map(|r| r.ok())
-            .collect();
-
+    for (pid, indices) in &person_face_map {
+        let embeddings: Vec<&Vec<f32>> = indices.iter().map(|&i| &all_faces[i].embedding).collect();
+        let file_ids: std::collections::HashSet<i64> =
+            indices.iter().map(|&i| all_faces[i].file_id).collect();
         if !embeddings.is_empty() {
-            let dim = embeddings[0].len();
-            let mut mean = vec![0.0f32; dim];
-            for emb in &embeddings {
-                for (i, v) in emb.iter().enumerate() {
-                    mean[i] += v;
-                }
-            }
-            let n = embeddings.len() as f32;
-            for v in &mut mean {
-                *v /= n;
-            }
-            // L2 normalize the centroid
-            let norm = mean.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-10);
-            for v in &mut mean {
-                *v /= norm;
-            }
+            let count = embeddings.len();
+            let owned: Vec<Vec<f32>> = embeddings.iter().map(|e| (*e).clone()).collect();
+            let centroid = compute_centroid(&owned);
             centroids.push(PersonCentroid {
                 person_id: *pid,
-                centroid: mean,
+                centroid,
+                count,
+                file_ids,
             });
         }
     }
@@ -2780,13 +2911,20 @@ pub fn cluster_faces(db_path: &Path, threshold: f32) -> AppResult<crate::models:
     let mut update_stmt =
         conn.prepare("UPDATE face_detections SET person_id = ?1 WHERE id = ?2")?;
 
-    for face in &unassigned {
-        // Find best matching centroid
+    for &face_id in &unassigned_ids {
+        let idx = face_idx[&face_id];
+        // Copy needed fields to avoid borrowing all_faces across mutation
+        let face_embedding = all_faces[idx].embedding.clone();
+        let face_file_id = all_faces[idx].file_id;
+
         let mut best_sim = 0.0f32;
         let mut best_person_id: Option<i64> = None;
 
         for c in &centroids {
-            let sim = crate::face::cosine_similarity(&face.embedding, &c.centroid);
+            if c.file_ids.contains(&face_file_id) {
+                continue;
+            }
+            let sim = crate::face::cosine_similarity(&face_embedding, &c.centroid);
             if sim > best_sim {
                 best_sim = sim;
                 best_person_id = Some(c.person_id);
@@ -2794,61 +2932,301 @@ pub fn cluster_faces(db_path: &Path, threshold: f32) -> AppResult<crate::models:
         }
 
         if best_sim >= threshold {
-            // Assign to existing person
             let pid = best_person_id.expect("best_person_id set when best_sim >= threshold");
-            update_stmt.execute(params![pid, face.id])?;
+            update_stmt.execute(params![pid, face_id])?;
             assigned_faces += 1;
+            all_faces[idx].person_id = Some(pid);
 
-            // Update centroid incrementally
             if let Some(c) = centroids.iter_mut().find(|c| c.person_id == pid) {
-                // Simple approach: re-average would be costly; just blend in the new embedding
-                let dim = c.centroid.len();
-                for i in 0..dim {
-                    c.centroid[i] += face.embedding[i];
+                let new_count = c.count + 1;
+                for (ci, fi) in c.centroid.iter_mut().zip(face_embedding.iter()) {
+                    *ci = (*ci * c.count as f32 + fi) / new_count as f32;
                 }
-                let norm = c
-                    .centroid
-                    .iter()
-                    .map(|x| x * x)
-                    .sum::<f32>()
-                    .sqrt()
-                    .max(1e-10);
-                for v in &mut c.centroid {
-                    *v /= norm;
-                }
+                c.count = new_count;
+                l2_normalize(&mut c.centroid);
+                c.file_ids.insert(face_file_id);
             }
         } else {
-            // Create new person
             let next_name = format!("Person {}", centroids.len() + 1);
             conn.execute(
                 "INSERT INTO people (name, created_at) VALUES (?1, ?2)",
                 params![next_name, now],
             )?;
             let new_pid = conn.last_insert_rowid();
-            update_stmt.execute(params![new_pid, face.id])?;
+            update_stmt.execute(params![new_pid, face_id])?;
             new_persons += 1;
             assigned_faces += 1;
+            all_faces[idx].person_id = Some(new_pid);
 
+            let mut file_ids = std::collections::HashSet::new();
+            file_ids.insert(face_file_id);
             centroids.push(PersonCentroid {
                 person_id: new_pid,
-                centroid: face.embedding.clone(),
+                centroid: face_embedding,
+                count: 1,
+                file_ids,
             });
         }
     }
+    drop(update_stmt);
 
-    // Update representative_face_id for all persons (highest confidence face with a crop_path)
+    // ── Merge pass: count-gated linkage ──
+    let merge_threshold = threshold * 0.85;
+
+    // Build per-person embedding lists from in-memory data (no re-query)
+    struct PersonEmbeddings {
+        person_id: i64,
+        face_ids: Vec<i64>,
+        embeddings: Vec<Vec<f32>>,
+        file_ids: std::collections::HashSet<i64>,
+    }
+    let mut person_embs: Vec<PersonEmbeddings> = Vec::new();
+    {
+        let mut pmap: std::collections::HashMap<i64, PersonEmbeddings> =
+            std::collections::HashMap::new();
+        for f in all_faces.iter() {
+            if let Some(pid) = f.person_id {
+                let entry = pmap.entry(pid).or_insert_with(|| PersonEmbeddings {
+                    person_id: pid,
+                    face_ids: Vec::new(),
+                    embeddings: Vec::new(),
+                    file_ids: std::collections::HashSet::new(),
+                });
+                entry.face_ids.push(f.id);
+                entry.embeddings.push(f.embedding.clone());
+                entry.file_ids.insert(f.file_id);
+            }
+        }
+        person_embs.extend(pmap.into_values());
+    }
+
+    fn min_matching_pairs(a: usize, b: usize) -> usize {
+        let smaller = a.min(b);
+        if smaller <= 2 {
+            1
+        } else if smaller <= 4 {
+            2
+        } else {
+            3
+        }
+    }
+
+    loop {
+        let mut merge_pair: Option<(usize, usize)> = None;
+        let mut best_merge_score = 0.0f32;
+
+        for i in 0..person_embs.len() {
+            for j in (i + 1)..person_embs.len() {
+                if !person_embs[i]
+                    .file_ids
+                    .is_disjoint(&person_embs[j].file_ids)
+                {
+                    continue;
+                }
+
+                let n_a = person_embs[i].embeddings.len();
+                let n_b = person_embs[j].embeddings.len();
+                let required = min_matching_pairs(n_a, n_b);
+
+                let mut matching_count = 0usize;
+                let mut best_sim = 0.0f32;
+                for ea in &person_embs[i].embeddings {
+                    for eb in &person_embs[j].embeddings {
+                        let sim = crate::face::cosine_similarity(ea, eb);
+                        if sim >= merge_threshold {
+                            matching_count += 1;
+                        }
+                        if sim > best_sim {
+                            best_sim = sim;
+                        }
+                    }
+                }
+
+                if matching_count >= required && best_sim > best_merge_score {
+                    best_merge_score = best_sim;
+                    merge_pair = Some((i, j));
+                }
+            }
+        }
+
+        let Some((i, j)) = merge_pair else {
+            break;
+        };
+
+        let target_pid = person_embs[i].person_id;
+        let source_pid = person_embs[j].person_id;
+        let n_a = person_embs[i].embeddings.len();
+        let n_b = person_embs[j].embeddings.len();
+        log::info!(
+            "Merging person {} ({} faces) into person {} ({} faces) (best sim: {:.3}, required {} pairs)",
+            source_pid,
+            n_b,
+            target_pid,
+            n_a,
+            best_merge_score,
+            min_matching_pairs(n_a, n_b)
+        );
+
+        conn.execute(
+            "UPDATE face_detections SET person_id = ?1 WHERE person_id = ?2",
+            params![target_pid, source_pid],
+        )?;
+        conn.execute("DELETE FROM people WHERE id = ?1", params![source_pid])?;
+
+        // Update in-memory person_id for merged faces
+        for fid in &person_embs[j].face_ids {
+            if let Some(&idx) = face_idx.get(fid) {
+                all_faces[idx].person_id = Some(target_pid);
+            }
+        }
+
+        let removed = person_embs.remove(j);
+        person_embs[i].face_ids.extend(removed.face_ids);
+        person_embs[i].embeddings.extend(removed.embeddings);
+        person_embs[i].file_ids.extend(removed.file_ids);
+    }
+
+    // ── Outlier pruning: average-neighbor similarity ──
+    const OUTLIER_AVG_THRESHOLD: f32 = 0.20;
+    {
+        for pe in &person_embs {
+            let n = pe.embeddings.len();
+            if n < 3 {
+                continue;
+            }
+            let mut to_prune = Vec::new();
+            for (idx, emb) in pe.embeddings.iter().enumerate() {
+                let mut sim_sum = 0.0f32;
+                for (jdx, other_emb) in pe.embeddings.iter().enumerate() {
+                    if idx == jdx {
+                        continue;
+                    }
+                    sim_sum += crate::face::cosine_similarity(emb, other_emb);
+                }
+                let avg_sim = sim_sum / (n - 1) as f32;
+                if avg_sim < OUTLIER_AVG_THRESHOLD {
+                    to_prune.push((pe.face_ids[idx], avg_sim));
+                }
+            }
+            for (face_id, avg_sim) in &to_prune {
+                conn.execute(
+                    "UPDATE face_detections SET person_id = NULL WHERE id = ?1",
+                    params![face_id],
+                )?;
+                log::info!(
+                    "Pruned outlier face {face_id} from person {} (avg neighbor sim: {avg_sim:.3})",
+                    pe.person_id
+                );
+            }
+        }
+    }
+
+    // Update representative_face_id: prefer face with a crop, fall back to highest confidence
     conn.execute_batch(
-        "UPDATE people SET representative_face_id = (
-            SELECT fd.id FROM face_detections fd
-            WHERE fd.person_id = people.id AND fd.crop_path IS NOT NULL
-            ORDER BY fd.confidence DESC LIMIT 1
+        "UPDATE people SET representative_face_id = COALESCE(
+            (SELECT fd.id FROM face_detections fd
+             WHERE fd.person_id = people.id AND fd.crop_path IS NOT NULL
+             ORDER BY fd.confidence DESC LIMIT 1),
+            (SELECT fd.id FROM face_detections fd
+             WHERE fd.person_id = people.id
+             ORDER BY fd.confidence DESC LIMIT 1)
         )",
+    )?;
+
+    // Cleanup: remove persons that have no assigned faces
+    conn.execute(
+        "DELETE FROM people WHERE id NOT IN (
+            SELECT DISTINCT person_id FROM face_detections WHERE person_id IS NOT NULL
+        )",
+        [],
     )?;
 
     Ok(crate::models::ClusterResult {
         new_persons,
         assigned_faces,
     })
+}
+
+/// Reset all person assignments and re-cluster from scratch.
+pub fn recluster_faces(db_path: &Path, threshold: f32) -> AppResult<crate::models::ClusterResult> {
+    let conn = open_conn(db_path)?;
+    // Clear all person assignments
+    conn.execute("UPDATE face_detections SET person_id = NULL", [])?;
+    // Delete all person records
+    conn.execute("DELETE FROM people", [])?;
+    drop(conn);
+    // Re-run clustering from scratch
+    cluster_faces(db_path, threshold)
+}
+
+/// Compute the maximum face-to-face cosine similarity between two persons.
+/// Returns the best score and the two face IDs that produced it.
+pub fn person_similarity(
+    db_path: &Path,
+    person_a: i64,
+    person_b: i64,
+) -> AppResult<(f32, Option<(i64, i64)>)> {
+    let conn = open_conn(db_path)?;
+
+    let load_embs = |pid: i64| -> AppResult<Vec<(i64, Vec<f32>)>> {
+        let mut stmt =
+            conn.prepare("SELECT id, embedding FROM face_detections WHERE person_id = ?1")?;
+        let embs: Vec<(i64, Vec<f32>)> = stmt
+            .query_map(params![pid], |row| {
+                let id: i64 = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                Ok((id, crate::face::blob_to_embedding(&blob)))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(embs)
+    };
+
+    let embs_a = load_embs(person_a)?;
+    let embs_b = load_embs(person_b)?;
+
+    let mut best_sim = 0.0f32;
+    let mut best_pair: Option<(i64, i64)> = None;
+
+    for (id_a, ea) in &embs_a {
+        for (id_b, eb) in &embs_b {
+            let sim = crate::face::cosine_similarity(ea, eb);
+            if sim > best_sim {
+                best_sim = sim;
+                best_pair = Some((*id_a, *id_b));
+            }
+        }
+    }
+
+    Ok((best_sim, best_pair))
+}
+
+/// Return faces that have no crop_path, with the source file path and bbox for regeneration.
+pub fn faces_missing_crops(db_path: &Path) -> AppResult<Vec<crate::models::FaceCropJob>> {
+    let conn = open_conn(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT fd.id, fd.bbox_x, fd.bbox_y, fd.bbox_w, fd.bbox_h,
+                r.root_path || '/' || f.rel_path AS abs_path
+         FROM face_detections fd
+         JOIN files f ON f.id = fd.file_id
+         JOIN roots r ON r.id = f.root_id
+         WHERE fd.crop_path IS NULL AND f.deleted_at IS NULL",
+    )?;
+    let jobs = stmt
+        .query_map([], |row| {
+            let x: f32 = row.get(1)?;
+            let y: f32 = row.get(2)?;
+            let w: f32 = row.get(3)?;
+            let h: f32 = row.get(4)?;
+            Ok(crate::models::FaceCropJob {
+                face_id: row.get(0)?,
+                bbox: [x, y, x + w, y + h], // convert (x,y,w,h) → (x1,y1,x2,y2)
+                abs_path: row.get(5)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(jobs)
 }
 
 // ── Subdirectory listing ────────────────────────────────────────────
@@ -5416,6 +5794,663 @@ mod tests {
         // Scoped to root_a
         let scoped = list_persons(&db_path, &[root_a]).expect("scoped");
         assert_eq!(scoped.len(), 1);
+    }
+
+    #[test]
+    fn recluster_faces_resets_and_reclusters() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/recluster").expect("root");
+
+        // Insert 3 files with orthogonal embeddings → 3 persons initially
+        for (i, name) in ["a.jpg", "b.jpg", "c.jpg"].iter().enumerate() {
+            let f = sample_record(root_id, name, &format!("fp-{i}"));
+            upsert_file_record(&db_path, &f).expect("file");
+            let fid = file_id_by_path(&db_path, root_id, name);
+            let emb: Vec<f32> = (0..512).map(|j| if j == i { 1.0 } else { 0.0 }).collect();
+            insert_test_face(&db_path, fid, &emb);
+        }
+
+        cluster_faces(&db_path, 0.45).expect("initial cluster");
+        let persons = list_persons(&db_path, &[]).expect("list");
+        assert_eq!(persons.len(), 3);
+
+        // Recluster should reset and produce same result
+        let result = recluster_faces(&db_path, 0.45).expect("recluster");
+        assert_eq!(result.new_persons, 3);
+        assert_eq!(result.assigned_faces, 3);
+        let persons = list_persons(&db_path, &[]).expect("list after recluster");
+        assert_eq!(persons.len(), 3);
+    }
+
+    #[test]
+    fn cluster_merge_pass_consolidates_similar_centroids() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/merge_pass").expect("root");
+
+        // Create 3 faces: A and C are nearly identical, B is very different.
+        // Process order is A, B, C. A creates person 1, B creates person 2.
+        // C is similar to A but may create person 3 depending on centroid state.
+        // The merge pass should consolidate A and C into one person.
+        let mut emb_a: Vec<f32> = vec![0.0; 512];
+        emb_a[0] = 1.0;
+        emb_a[1] = 0.05;
+
+        let emb_b: Vec<f32> = (0..512).map(|i| if i == 1 { 1.0 } else { 0.0 }).collect();
+
+        let mut emb_c: Vec<f32> = vec![0.0; 512];
+        emb_c[0] = 1.0;
+        emb_c[1] = 0.08;
+
+        for (name, fp, emb) in [
+            ("a.jpg", "fp-a", &emb_a),
+            ("b.jpg", "fp-b", &emb_b),
+            ("c.jpg", "fp-c", &emb_c),
+        ] {
+            let f = sample_record(root_id, name, fp);
+            upsert_file_record(&db_path, &f).expect("file");
+            let fid = file_id_by_path(&db_path, root_id, name);
+            insert_test_face(&db_path, fid, emb);
+        }
+
+        let result = cluster_faces(&db_path, 0.35).expect("cluster");
+        // A and C should be in the same person (very similar), B separate
+        let persons = list_persons(&db_path, &[]).expect("list");
+        assert_eq!(
+            persons.len(),
+            2,
+            "Expected 2 persons (A+C merged, B separate)"
+        );
+        assert_eq!(result.assigned_faces, 3);
+    }
+
+    // ── Clustering invariant tests ────────────────────────────────────
+
+    /// Helper: insert a test face with specific embedding + confidence + bbox size.
+    fn insert_test_face_full(
+        db_path: &std::path::Path,
+        file_id: i64,
+        embedding: &[f32],
+        confidence: f32,
+        bbox_size: f32,
+    ) -> i64 {
+        let face = crate::face::FaceDetection {
+            bbox: [10.0, 10.0, 10.0 + bbox_size, 10.0 + bbox_size],
+            confidence,
+            keypoints: [[0.0; 2]; 5],
+            embedding: embedding.to_vec(),
+        };
+        let ids = insert_face_detections(db_path, file_id, &[face]).expect("insert faces");
+        ids[0]
+    }
+
+    /// Make a random-ish embedding near a base direction.
+    fn make_similar_embedding(base: &[f32], noise: f32, seed: u32) -> Vec<f32> {
+        let mut emb = base.to_vec();
+        for (i, v) in emb.iter_mut().enumerate() {
+            let offset = ((i as u32).wrapping_mul(seed).wrapping_add(7) % 100) as f32 / 100.0;
+            *v += noise * (offset - 0.5);
+        }
+        super::l2_normalize(&mut emb);
+        emb
+    }
+
+    #[test]
+    fn one_face_per_photo_constraint() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/faces").expect("root");
+
+        // File A has 3 faces with similar embeddings
+        let f1 = sample_record(root_id, "group.jpg", "fp-group");
+        upsert_file_record(&db_path, &f1).expect("file");
+        let fid1 = file_id_by_path(&db_path, root_id, "group.jpg");
+
+        let base_emb: Vec<f32> = (0..512).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect();
+        let emb_a = make_similar_embedding(&base_emb, 0.05, 1);
+        let emb_b = make_similar_embedding(&base_emb, 0.05, 2);
+        let emb_c = make_similar_embedding(&base_emb, 0.05, 3);
+
+        insert_test_face(&db_path, fid1, &emb_a);
+        insert_test_face(&db_path, fid1, &emb_b);
+        insert_test_face(&db_path, fid1, &emb_c);
+
+        // File B has 1 face with same direction
+        let f2 = sample_record(root_id, "single.jpg", "fp-single");
+        upsert_file_record(&db_path, &f2).expect("file");
+        let fid2 = file_id_by_path(&db_path, root_id, "single.jpg");
+        let emb_d = make_similar_embedding(&base_emb, 0.05, 4);
+        insert_test_face(&db_path, fid2, &emb_d);
+
+        cluster_faces(&db_path, 0.30).expect("cluster");
+        let persons = list_persons(&db_path, &[]).expect("list");
+
+        // No person should have >1 face from the same file_id
+        let conn = open_conn(&db_path).expect("open");
+        for p in &persons {
+            let dup_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM (
+                        SELECT file_id, COUNT(*) as cnt
+                        FROM face_detections WHERE person_id = ?1
+                        GROUP BY file_id HAVING cnt > 1
+                    )",
+                    params![p.id],
+                    |r| r.get(0),
+                )
+                .expect("query");
+            assert_eq!(
+                dup_count, 0,
+                "Person {} has multiple faces from the same file",
+                p.id
+            );
+        }
+        // At least 2 persons needed (3 same-file faces can't all go to 1 person)
+        assert!(
+            persons.len() >= 2,
+            "Expected at least 2 persons, got {}",
+            persons.len()
+        );
+    }
+
+    #[test]
+    fn merge_blocks_on_file_overlap() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/faces").expect("root");
+
+        // Group photo: 2 different people in same file
+        let f1 = sample_record(root_id, "group.jpg", "fp-g");
+        upsert_file_record(&db_path, &f1).expect("file");
+        let fid1 = file_id_by_path(&db_path, root_id, "group.jpg");
+
+        // Person A direction: [1, 0, 0, ...]
+        let emb_a: Vec<f32> = (0..512).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect();
+        // Person B direction: [0, 1, 0, ...]
+        let emb_b: Vec<f32> = (0..512).map(|i| if i == 1 { 1.0 } else { 0.0 }).collect();
+
+        let face_a = insert_test_face(&db_path, fid1, &emb_a);
+        let face_b = insert_test_face(&db_path, fid1, &emb_b);
+
+        // Manually assign to different persons
+        let conn = open_conn(&db_path).expect("open");
+        let now = super::now_epoch_secs();
+        conn.execute(
+            "INSERT INTO people (name, created_at) VALUES ('A', ?1)",
+            params![now],
+        )
+        .expect("person A");
+        let pid_a = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO people (name, created_at) VALUES ('B', ?1)",
+            params![now],
+        )
+        .expect("person B");
+        let pid_b = conn.last_insert_rowid();
+        conn.execute(
+            "UPDATE face_detections SET person_id = ?1 WHERE id = ?2",
+            params![pid_a, face_a],
+        )
+        .expect("assign A");
+        conn.execute(
+            "UPDATE face_detections SET person_id = ?1 WHERE id = ?2",
+            params![pid_b, face_b],
+        )
+        .expect("assign B");
+        drop(conn);
+
+        // Add solo photos for each person so merge pass sees them as candidates
+        let f2 = sample_record(root_id, "solo_a.jpg", "fp-sa");
+        upsert_file_record(&db_path, &f2).expect("file");
+        let fid2 = file_id_by_path(&db_path, root_id, "solo_a.jpg");
+        // Give person A a solo face — close to A but also non-zero in B direction
+        // to make merge tempting
+        let mut emb_a2 = emb_a.clone();
+        emb_a2[1] = 0.4;
+        super::l2_normalize(&mut emb_a2);
+        let face_a2 = insert_test_face(&db_path, fid2, &emb_a2);
+        let conn = open_conn(&db_path).expect("open");
+        conn.execute(
+            "UPDATE face_detections SET person_id = ?1 WHERE id = ?2",
+            params![pid_a, face_a2],
+        )
+        .expect("assign");
+        drop(conn);
+
+        let f3 = sample_record(root_id, "solo_b.jpg", "fp-sb");
+        upsert_file_record(&db_path, &f3).expect("file");
+        let fid3 = file_id_by_path(&db_path, root_id, "solo_b.jpg");
+        let mut emb_b2 = emb_b.clone();
+        emb_b2[0] = 0.4;
+        super::l2_normalize(&mut emb_b2);
+        let face_b2 = insert_test_face(&db_path, fid3, &emb_b2);
+        let conn = open_conn(&db_path).expect("open");
+        conn.execute(
+            "UPDATE face_detections SET person_id = ?1 WHERE id = ?2",
+            params![pid_b, face_b2],
+        )
+        .expect("assign");
+        drop(conn);
+
+        // Now run clustering (it will process unassigned first, then merge pass)
+        // All faces are already assigned, so only the merge pass runs
+        cluster_faces(&db_path, 0.30).expect("cluster");
+
+        let persons = list_persons(&db_path, &[]).expect("list");
+        assert_eq!(
+            persons.len(),
+            2,
+            "Persons sharing a file must NOT be merged"
+        );
+    }
+
+    #[test]
+    fn merge_allows_non_overlapping_files() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/faces").expect("root");
+
+        let base: Vec<f32> = (0..512).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect();
+
+        // Create 2 files with very similar embeddings, pre-assign to separate persons
+        let conn = open_conn(&db_path).expect("open");
+        let now = super::now_epoch_secs();
+        conn.execute(
+            "INSERT INTO people (name, created_at) VALUES ('X', ?1)",
+            params![now],
+        )
+        .expect("person X");
+        let pid_x = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO people (name, created_at) VALUES ('Y', ?1)",
+            params![now],
+        )
+        .expect("person Y");
+        let pid_y = conn.last_insert_rowid();
+        drop(conn);
+
+        for (i, pid) in [(0u32, pid_x), (1, pid_y)] {
+            let name = format!("face_{i}.jpg");
+            let fp = format!("fp-{i}");
+            let f = sample_record(root_id, &name, &fp);
+            upsert_file_record(&db_path, &f).expect("file");
+            let fid = file_id_by_path(&db_path, root_id, &name);
+            let emb = make_similar_embedding(&base, 0.02, i + 10);
+            let face_id = insert_test_face(&db_path, fid, &emb);
+            let conn = open_conn(&db_path).expect("open");
+            conn.execute(
+                "UPDATE face_detections SET person_id = ?1 WHERE id = ?2",
+                params![pid, face_id],
+            )
+            .expect("assign");
+        }
+
+        // Merge pass should combine them (very similar, no file overlap)
+        cluster_faces(&db_path, 0.30).expect("cluster");
+
+        let persons = list_persons(&db_path, &[]).expect("list");
+        assert_eq!(
+            persons.len(),
+            1,
+            "Non-overlapping similar clusters should merge"
+        );
+    }
+
+    #[test]
+    fn outlier_pruning_removes_dissimilar_face() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/faces").expect("root");
+
+        let base: Vec<f32> = (0..512).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect();
+        // Orthogonal outlier
+        let outlier: Vec<f32> = (0..512).map(|i| if i == 1 { 1.0 } else { 0.0 }).collect();
+
+        // 5 similar faces in different files
+        let conn = open_conn(&db_path).expect("open");
+        let now = super::now_epoch_secs();
+        conn.execute(
+            "INSERT INTO people (name, created_at) VALUES ('Cluster', ?1)",
+            params![now],
+        )
+        .expect("person");
+        let pid = conn.last_insert_rowid();
+        drop(conn);
+
+        for i in 0..5 {
+            let name = format!("sim_{i}.jpg");
+            let fp = format!("fp-sim-{i}");
+            let f = sample_record(root_id, &name, &fp);
+            upsert_file_record(&db_path, &f).expect("file");
+            let fid = file_id_by_path(&db_path, root_id, &name);
+            let emb = make_similar_embedding(&base, 0.02, i + 100);
+            let face_id = insert_test_face(&db_path, fid, &emb);
+            let conn = open_conn(&db_path).expect("open");
+            conn.execute(
+                "UPDATE face_detections SET person_id = ?1 WHERE id = ?2",
+                params![pid, face_id],
+            )
+            .expect("assign");
+        }
+
+        // Add outlier face in a different file, assigned to same person
+        let f_out = sample_record(root_id, "outlier.jpg", "fp-outlier");
+        upsert_file_record(&db_path, &f_out).expect("file");
+        let fid_out = file_id_by_path(&db_path, root_id, "outlier.jpg");
+        let outlier_face_id = insert_test_face(&db_path, fid_out, &outlier);
+        let conn = open_conn(&db_path).expect("open");
+        conn.execute(
+            "UPDATE face_detections SET person_id = ?1 WHERE id = ?2",
+            params![pid, outlier_face_id],
+        )
+        .expect("assign outlier");
+        drop(conn);
+
+        // Run clustering — outlier pruning should unassign the outlier
+        cluster_faces(&db_path, 0.30).expect("cluster");
+
+        let conn = open_conn(&db_path).expect("open");
+        let outlier_person: Option<i64> = conn
+            .query_row(
+                "SELECT person_id FROM face_detections WHERE id = ?1",
+                params![outlier_face_id],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert!(
+            outlier_person.is_none(),
+            "Outlier face should be pruned (person_id = NULL)"
+        );
+    }
+
+    #[test]
+    fn count_gated_merge_small_clusters() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/faces").expect("root");
+
+        // Two 1-face clusters with moderately similar embeddings
+        let base: Vec<f32> = (0..512).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect();
+        let sim = make_similar_embedding(&base, 0.08, 42);
+
+        let conn = open_conn(&db_path).expect("open");
+        let now = super::now_epoch_secs();
+        conn.execute(
+            "INSERT INTO people (name, created_at) VALUES ('P1', ?1)",
+            params![now],
+        )
+        .expect("p1");
+        let pid1 = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO people (name, created_at) VALUES ('P2', ?1)",
+            params![now],
+        )
+        .expect("p2");
+        let pid2 = conn.last_insert_rowid();
+        drop(conn);
+
+        let f1 = sample_record(root_id, "s1.jpg", "fp-s1");
+        upsert_file_record(&db_path, &f1).expect("file");
+        let fid1 = file_id_by_path(&db_path, root_id, "s1.jpg");
+        let face1 = insert_test_face(&db_path, fid1, &base);
+        let conn = open_conn(&db_path).expect("open");
+        conn.execute(
+            "UPDATE face_detections SET person_id = ?1 WHERE id = ?2",
+            params![pid1, face1],
+        )
+        .expect("assign");
+        drop(conn);
+
+        let f2 = sample_record(root_id, "s2.jpg", "fp-s2");
+        upsert_file_record(&db_path, &f2).expect("file");
+        let fid2 = file_id_by_path(&db_path, root_id, "s2.jpg");
+        let face2 = insert_test_face(&db_path, fid2, &sim);
+        let conn = open_conn(&db_path).expect("open");
+        conn.execute(
+            "UPDATE face_detections SET person_id = ?1 WHERE id = ?2",
+            params![pid2, face2],
+        )
+        .expect("assign");
+        drop(conn);
+
+        // Small clusters (1 face each): need only 1 matching pair → should merge
+        cluster_faces(&db_path, 0.30).expect("cluster");
+        let persons = list_persons(&db_path, &[]).expect("list");
+        assert_eq!(persons.len(), 1, "Small clusters should merge with 1 pair");
+    }
+
+    #[test]
+    fn count_gated_merge_large_clusters_blocks() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/faces").expect("root");
+
+        // Direction A: [1, 0, 0, ...]
+        let dir_a: Vec<f32> = (0..512).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect();
+        // Direction B: [0, 1, 0, ...]
+        let dir_b: Vec<f32> = (0..512).map(|i| if i == 1 { 1.0 } else { 0.0 }).collect();
+
+        let conn = open_conn(&db_path).expect("open");
+        let now = super::now_epoch_secs();
+        conn.execute(
+            "INSERT INTO people (name, created_at) VALUES ('ClusterA', ?1)",
+            params![now],
+        )
+        .expect("pA");
+        let pid_a = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO people (name, created_at) VALUES ('ClusterB', ?1)",
+            params![now],
+        )
+        .expect("pB");
+        let pid_b = conn.last_insert_rowid();
+        drop(conn);
+
+        // Create 6 faces per cluster in different files
+        for i in 0..6u32 {
+            let name_a = format!("a_{i}.jpg");
+            let fa = sample_record(root_id, &name_a, &format!("fp-a-{i}"));
+            upsert_file_record(&db_path, &fa).expect("file");
+            let fid_a = file_id_by_path(&db_path, root_id, &name_a);
+            let emb_a = make_similar_embedding(&dir_a, 0.02, i + 200);
+            let face_a = insert_test_face(&db_path, fid_a, &emb_a);
+
+            let name_b = format!("b_{i}.jpg");
+            let fb = sample_record(root_id, &name_b, &format!("fp-b-{i}"));
+            upsert_file_record(&db_path, &fb).expect("file");
+            let fid_b = file_id_by_path(&db_path, root_id, &name_b);
+            let emb_b = make_similar_embedding(&dir_b, 0.02, i + 300);
+            let face_b = insert_test_face(&db_path, fid_b, &emb_b);
+
+            let conn = open_conn(&db_path).expect("open");
+            conn.execute(
+                "UPDATE face_detections SET person_id = ?1 WHERE id = ?2",
+                params![pid_a, face_a],
+            )
+            .expect("assign");
+            conn.execute(
+                "UPDATE face_detections SET person_id = ?1 WHERE id = ?2",
+                params![pid_b, face_b],
+            )
+            .expect("assign");
+            drop(conn);
+        }
+
+        // Large clusters (6 each): need 3 matching pairs.
+        // Orthogonal embeddings → 0 matching pairs → should NOT merge.
+        cluster_faces(&db_path, 0.30).expect("cluster");
+        let persons = list_persons(&db_path, &[]).expect("list");
+        assert_eq!(persons.len(), 2, "Large orthogonal clusters must NOT merge");
+    }
+
+    // ── Unassign face tests ────────────────────────────────────────────
+
+    #[test]
+    fn unassign_face_sets_null() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/faces").expect("root");
+
+        let emb: Vec<f32> = (0..512).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect();
+
+        let f1 = sample_record(root_id, "p1.jpg", "fp-p1");
+        upsert_file_record(&db_path, &f1).expect("file");
+        let fid1 = file_id_by_path(&db_path, root_id, "p1.jpg");
+        let f2 = sample_record(root_id, "p2.jpg", "fp-p2");
+        upsert_file_record(&db_path, &f2).expect("file");
+        let fid2 = file_id_by_path(&db_path, root_id, "p2.jpg");
+
+        let face1 = insert_test_face(&db_path, fid1, &emb);
+        let face2 = insert_test_face(&db_path, fid2, &emb);
+
+        // Assign both to one person
+        cluster_faces(&db_path, 0.30).expect("cluster");
+        let persons = list_persons(&db_path, &[]).expect("list");
+        assert_eq!(persons.len(), 1);
+        assert_eq!(persons[0].face_count, 2);
+
+        // Unassign one face
+        unassign_face_from_person(&db_path, face1).expect("unassign");
+
+        let persons = list_persons(&db_path, &[]).expect("list");
+        assert_eq!(persons.len(), 1, "Person should survive with 1 face");
+        assert_eq!(persons[0].face_count, 1);
+
+        // Check the face is unassigned
+        let conn = open_conn(&db_path).expect("open");
+        let pid: Option<i64> = conn
+            .query_row(
+                "SELECT person_id FROM face_detections WHERE id = ?1",
+                params![face1],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert!(pid.is_none(), "Unassigned face should have person_id NULL");
+        // face2 still assigned
+        let pid2: Option<i64> = conn
+            .query_row(
+                "SELECT person_id FROM face_detections WHERE id = ?1",
+                params![face2],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert!(pid2.is_some(), "Other face should remain assigned");
+    }
+
+    #[test]
+    fn unassign_last_face_deletes_person() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/faces").expect("root");
+
+        let emb: Vec<f32> = (0..512).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect();
+
+        let f1 = sample_record(root_id, "solo.jpg", "fp-solo");
+        upsert_file_record(&db_path, &f1).expect("file");
+        let fid = file_id_by_path(&db_path, root_id, "solo.jpg");
+        let face_id = insert_test_face(&db_path, fid, &emb);
+
+        cluster_faces(&db_path, 0.30).expect("cluster");
+        let persons = list_persons(&db_path, &[]).expect("list");
+        assert_eq!(persons.len(), 1);
+
+        // Unassign the only face
+        unassign_face_from_person(&db_path, face_id).expect("unassign");
+
+        let persons = list_persons(&db_path, &[]).expect("list");
+        assert_eq!(persons.len(), 0, "Person should be deleted");
+
+        // Verify person record actually deleted
+        let conn = open_conn(&db_path).expect("open");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM people", [], |r| r.get(0))
+            .expect("query");
+        assert_eq!(count, 0, "No people records should remain");
+    }
+
+    #[test]
+    fn unassign_representative_updates() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/faces").expect("root");
+
+        let emb: Vec<f32> = (0..512).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect();
+
+        let f1 = sample_record(root_id, "r1.jpg", "fp-r1");
+        upsert_file_record(&db_path, &f1).expect("file");
+        let fid1 = file_id_by_path(&db_path, root_id, "r1.jpg");
+        let f2 = sample_record(root_id, "r2.jpg", "fp-r2");
+        upsert_file_record(&db_path, &f2).expect("file");
+        let fid2 = file_id_by_path(&db_path, root_id, "r2.jpg");
+
+        let face1 = insert_test_face(&db_path, fid1, &emb);
+        let face2 = insert_test_face(&db_path, fid2, &emb);
+
+        cluster_faces(&db_path, 0.30).expect("cluster");
+
+        // Get the person's representative
+        let conn = open_conn(&db_path).expect("open");
+        let (pid, rep_face): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT id, representative_face_id FROM people LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("query");
+
+        // Unassign whatever the representative is
+        let rep = rep_face.expect("should have representative");
+        unassign_face_from_person(&db_path, rep).expect("unassign rep");
+
+        // Person should still exist with new representative
+        let new_rep: Option<i64> = conn
+            .query_row(
+                "SELECT representative_face_id FROM people WHERE id = ?1",
+                params![pid],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert!(new_rep.is_some(), "Should have a new representative");
+        let remaining = if rep == face1 { face2 } else { face1 };
+        assert_eq!(
+            new_rep.unwrap(),
+            remaining,
+            "New representative should be the remaining face"
+        );
+    }
+
+    #[test]
+    fn list_faces_for_person_returns_correct_data() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/faces").expect("root");
+
+        let emb: Vec<f32> = (0..512).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect();
+
+        let f1 = sample_record(root_id, "photo_a.jpg", "fp-la");
+        upsert_file_record(&db_path, &f1).expect("file");
+        let fid1 = file_id_by_path(&db_path, root_id, "photo_a.jpg");
+        let f2 = sample_record(root_id, "photo_b.jpg", "fp-lb");
+        upsert_file_record(&db_path, &f2).expect("file");
+        let fid2 = file_id_by_path(&db_path, root_id, "photo_b.jpg");
+
+        insert_test_face(&db_path, fid1, &emb);
+        insert_test_face(&db_path, fid2, &emb);
+
+        cluster_faces(&db_path, 0.30).expect("cluster");
+        let persons = list_persons(&db_path, &[]).expect("list");
+        assert_eq!(persons.len(), 1);
+
+        let faces = list_faces_for_person(&db_path, persons[0].id).expect("faces");
+        assert_eq!(faces.len(), 2);
+        let filenames: Vec<&str> = faces.iter().map(|f| f.filename.as_str()).collect();
+        assert!(filenames.contains(&"photo_a.jpg"));
+        assert!(filenames.contains(&"photo_b.jpg"));
+        for face in &faces {
+            assert_eq!(face.person_id, Some(persons[0].id));
+            assert!(face.confidence > 0.0);
+        }
     }
 
     fn file_id_by_path(db_path: &std::path::Path, root_id: i64, rel_path: &str) -> i64 {

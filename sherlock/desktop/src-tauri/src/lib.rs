@@ -17,6 +17,7 @@ mod video;
 mod video_server;
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -44,6 +45,7 @@ struct AppState {
     cli_folder_path: Option<String>,
     face_detect_progress: Arc<Mutex<Option<models::FaceDetectProgress>>>,
     face_detect_cancel: Arc<AtomicBool>,
+    recluster_progress: Arc<Mutex<Option<models::ReclusterProgress>>>,
 }
 
 #[tauri::command]
@@ -903,7 +905,146 @@ fn get_face_stats(
 
 #[tauri::command]
 fn cluster_faces(state: State<'_, AppState>) -> Result<models::ClusterResult, String> {
-    db::cluster_faces(&state.paths.db_file, 0.45).map_err(|e| e.to_string())
+    db::cluster_faces(&state.paths.db_file, 0.30).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn recluster_faces(state: State<'_, AppState>) -> Result<(), String> {
+    // Check if already running
+    {
+        let progress = state
+            .recluster_progress
+            .lock()
+            .expect("recluster progress mutex poisoned");
+        if progress.is_some() {
+            return Err("Re-clustering is already running".to_string());
+        }
+    }
+
+    let db_path = state.paths.db_file.clone();
+    let face_crops_dir = state.paths.face_crops_dir.clone();
+    let progress_arc = state.recluster_progress.clone();
+
+    tauri::async_runtime::spawn(async move {
+        let progress_cleanup = progress_arc.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            run_recluster(&db_path, &face_crops_dir, &progress_arc)
+        })
+        .await;
+
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => log::error!("Re-clustering failed: {e}"),
+            Err(e) => log::error!("Re-clustering task panicked: {e}"),
+        }
+        // Clear progress after a short delay so UI can read the "done" state
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let mut progress = progress_cleanup
+            .lock()
+            .expect("recluster progress mutex poisoned");
+        *progress = None;
+    });
+
+    Ok(())
+}
+
+fn run_recluster(
+    db_path: &Path,
+    face_crops_dir: &Path,
+    progress_arc: &Arc<Mutex<Option<models::ReclusterProgress>>>,
+) -> error::AppResult<()> {
+    // Phase 1: Regenerate missing crops (batched — each image decoded only once)
+    let jobs = db::faces_missing_crops(db_path).unwrap_or_default();
+    let total_crops = jobs.len() as u64;
+
+    if total_crops > 0 {
+        log::info!("Regenerating {total_crops} missing face crops");
+        {
+            let mut progress = progress_arc.lock().expect("recluster progress mutex");
+            *progress = Some(models::ReclusterProgress {
+                phase: "crops".into(),
+                total: total_crops,
+                processed: 0,
+                result: None,
+            });
+        }
+
+        let progress_ref = progress_arc.clone();
+        let results = face::generate_face_crops_batch(&jobs, face_crops_dir, |done| {
+            let mut progress = progress_ref.lock().expect("recluster progress mutex");
+            if let Some(ref mut p) = *progress {
+                p.processed = done as u64;
+            }
+        });
+
+        for r in results {
+            match r.result {
+                Ok(crop_path) => {
+                    let _ =
+                        db::update_face_crop_path(db_path, r.face_id, &crop_path.to_string_lossy());
+                }
+                Err(e) => {
+                    log::warn!("Failed to regenerate crop for face {}: {e}", r.face_id);
+                }
+            }
+        }
+    }
+
+    // Phase 2: Clustering
+    {
+        let mut progress = progress_arc.lock().expect("recluster progress mutex");
+        *progress = Some(models::ReclusterProgress {
+            phase: "clustering".into(),
+            total: 0,
+            processed: 0,
+            result: None,
+        });
+    }
+
+    let result = db::recluster_faces(db_path, 0.30)?;
+    log::info!(
+        "Re-clustering complete: {} persons, {} faces assigned",
+        result.new_persons,
+        result.assigned_faces
+    );
+
+    // Phase 3: Done
+    {
+        let mut progress = progress_arc.lock().expect("recluster progress mutex");
+        *progress = Some(models::ReclusterProgress {
+            phase: "done".into(),
+            total: 0,
+            processed: 0,
+            result: Some(result),
+        });
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn get_recluster_status(
+    state: State<'_, AppState>,
+) -> Result<Option<models::ReclusterProgress>, String> {
+    let progress = state
+        .recluster_progress
+        .lock()
+        .expect("recluster progress mutex poisoned");
+    Ok(progress.clone())
+}
+
+#[tauri::command]
+fn person_similarity(
+    person_a: i64,
+    person_b: i64,
+    state: State<'_, AppState>,
+) -> Result<f32, String> {
+    let (sim, pair) = db::person_similarity(&state.paths.db_file, person_a, person_b)
+        .map_err(|e| e.to_string())?;
+    if let Some((fa, fb)) = pair {
+        log::info!("Person {person_a} vs {person_b}: best sim={sim:.4} (face {fa} vs {fb})");
+    }
+    Ok(sim)
 }
 
 #[tauri::command]
@@ -926,6 +1067,20 @@ fn rename_person(
 #[tauri::command]
 fn merge_persons(source_id: i64, target_id: i64, state: State<'_, AppState>) -> Result<(), String> {
     db::merge_persons(&state.paths.db_file, source_id, target_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_faces_for_person(
+    person_id: i64,
+    state: State<'_, AppState>,
+) -> Result<Vec<models::FaceInfo>, String> {
+    db::list_faces_for_person(&state.paths.db_file, person_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn unassign_face_from_person(face_id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    require_writable(&state)?;
+    db::unassign_face_from_person(&state.paths.db_file, face_id).map_err(|e| e.to_string())
 }
 
 fn resolve_ort_lib(app_handle: &tauri::AppHandle) -> std::path::PathBuf {
@@ -1055,26 +1210,32 @@ fn run_face_detection(
                     faces_found += faces.len() as u64;
                     match db::insert_face_detections(db_path, file.id, &faces) {
                         Ok(face_ids) => {
-                            // Generate face crops for each detected face
-                            for (face, face_id) in faces.iter().zip(face_ids.iter()) {
-                                match face::generate_face_crop(
-                                    abs_path,
-                                    &face.bbox,
-                                    face_crops_dir,
-                                    *face_id,
-                                ) {
-                                    Ok(crop_path) => {
-                                        let _ = db::update_face_crop_path(
-                                            db_path,
-                                            *face_id,
-                                            &crop_path.to_string_lossy(),
-                                        );
-                                    }
-                                    Err(e) => {
-                                        log::warn!(
-                                            "Failed to generate face crop for face {}: {e}",
-                                            face_id
-                                        );
+                            // Open image ONCE for all face crops in this file
+                            let crop_img = image::open(abs_path).ok().map(|raw| {
+                                let orientation = crate::exif::extract_orientation(abs_path);
+                                crate::exif::apply_orientation(raw, orientation)
+                            });
+                            if let Some(ref img) = crop_img {
+                                for (face, face_id) in faces.iter().zip(face_ids.iter()) {
+                                    match face::crop_face_from_image(
+                                        img,
+                                        &face.bbox,
+                                        face_crops_dir,
+                                        *face_id,
+                                    ) {
+                                        Ok(crop_path) => {
+                                            let _ = db::update_face_crop_path(
+                                                db_path,
+                                                *face_id,
+                                                &crop_path.to_string_lossy(),
+                                            );
+                                        }
+                                        Err(e) => {
+                                            log::warn!(
+                                                "Failed to generate face crop for face {}: {e}",
+                                                face_id
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -1117,7 +1278,7 @@ fn run_face_detection(
 
     // Auto-cluster faces into person groups
     if faces_found > 0 {
-        match db::cluster_faces(db_path, 0.45) {
+        match db::cluster_faces(db_path, 0.30) {
             Ok(result) => {
                 log::info!(
                     "Face clustering: {} new persons, {} faces assigned",
@@ -1466,6 +1627,7 @@ pub fn run() {
         cli_folder_path,
         face_detect_progress: Arc::new(Mutex::new(None)),
         face_detect_cancel: Arc::new(AtomicBool::new(false)),
+        recluster_progress: Arc::new(Mutex::new(None)),
     };
 
     tauri::Builder::default()
@@ -1535,9 +1697,14 @@ pub fn run() {
             get_face_stats,
             list_files_with_faces,
             cluster_faces,
+            recluster_faces,
+            get_recluster_status,
+            person_similarity,
             list_persons,
             rename_person,
-            merge_persons
+            merge_persons,
+            list_faces_for_person,
+            unassign_face_from_person
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

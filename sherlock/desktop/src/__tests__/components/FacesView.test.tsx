@@ -3,7 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { invoke } from "@tauri-apps/api/core";
 import FacesView from "../../components/Content/FacesView";
-import type { PersonInfo } from "../../types";
+import type { PersonInfo, FaceInfo } from "../../types";
 
 const mockedInvoke = vi.mocked(invoke);
 
@@ -21,6 +21,26 @@ const mockPerson2: PersonInfo = {
   faceCount: 3,
   cropPath: null,
   thumbnailPath: "/cache/thumbs/img2.jpg",
+};
+
+const mockFace1: FaceInfo = {
+  id: 10,
+  personId: 1,
+  fileId: 100,
+  relPath: "photos/face_a.jpg",
+  filename: "face_a.jpg",
+  confidence: 0.95,
+  cropPath: "/cache/face_crops/10.jpg",
+};
+
+const mockFace2: FaceInfo = {
+  id: 11,
+  personId: 1,
+  fileId: 101,
+  relPath: "photos/face_b.jpg",
+  filename: "face_b.jpg",
+  confidence: 0.88,
+  cropPath: "/cache/face_crops/11.jpg",
 };
 
 const defaultProps = {
@@ -72,9 +92,10 @@ describe("FacesView", () => {
     });
   });
 
-  it("calls onSelectPerson when card is clicked", async () => {
+  it("shows person detail view when card is clicked", async () => {
     mockedInvoke.mockImplementation(async (cmd: string) => {
       if (cmd === "list_persons") return [mockPerson];
+      if (cmd === "list_faces_for_person") return [mockFace1, mockFace2];
       return null;
     });
 
@@ -83,8 +104,39 @@ describe("FacesView", () => {
       expect(screen.getByText("Person 1")).toBeInTheDocument();
     });
 
-    // Click the card (which has the person name)
+    // Click the card — enters detail view (not onSelectPerson)
     await userEvent.click(screen.getByText("Person 1").closest(".faces-card")!);
+
+    await waitFor(() => {
+      expect(screen.getByText("Back to People")).toBeInTheDocument();
+      expect(screen.getByText("View Photos")).toBeInTheDocument();
+      expect(screen.getByText("face_a.jpg")).toBeInTheDocument();
+      expect(screen.getByText("face_b.jpg")).toBeInTheDocument();
+    });
+    // onSelectPerson should NOT have been called
+    expect(defaultProps.onSelectPerson).not.toHaveBeenCalled();
+  });
+
+  it("calls onSelectPerson via View Photos in detail view", async () => {
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_persons") return [mockPerson];
+      if (cmd === "list_faces_for_person") return [mockFace1];
+      return null;
+    });
+
+    render(<FacesView {...defaultProps} />);
+    await waitFor(() => {
+      expect(screen.getByText("Person 1")).toBeInTheDocument();
+    });
+
+    // Enter detail view
+    await userEvent.click(screen.getByText("Person 1").closest(".faces-card")!);
+    await waitFor(() => {
+      expect(screen.getByText("View Photos")).toBeInTheDocument();
+    });
+
+    // Click View Photos
+    await userEvent.click(screen.getByText("View Photos"));
     expect(defaultProps.onSelectPerson).toHaveBeenCalledWith(1, "Person 1");
   });
 
@@ -132,6 +184,98 @@ describe("FacesView", () => {
     render(<FacesView {...defaultProps} />);
     await waitFor(() => {
       expect(screen.getByText("5")).toBeInTheDocument(); // badge count
+    });
+  });
+
+  it("calls unassign_face_from_person when Remove clicked", async () => {
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_persons") return [mockPerson];
+      if (cmd === "list_faces_for_person") return [mockFace1, mockFace2];
+      if (cmd === "unassign_face_from_person") return null;
+      return null;
+    });
+
+    render(<FacesView {...defaultProps} />);
+    await waitFor(() => {
+      expect(screen.getByText("Person 1")).toBeInTheDocument();
+    });
+
+    // Enter detail view
+    await userEvent.click(screen.getByText("Person 1").closest(".faces-card")!);
+    await waitFor(() => {
+      expect(screen.getByText("face_a.jpg")).toBeInTheDocument();
+    });
+
+    // Click Remove on first face
+    const removeButtons = screen.getAllByText("Remove");
+    await userEvent.click(removeButtons[0]);
+
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith("unassign_face_from_person", { faceId: 10 });
+      expect(defaultProps.onNotice).toHaveBeenCalledWith("Face removed from person");
+    });
+  });
+
+  it("returns to person grid when Back to People clicked", async () => {
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_persons") return [mockPerson];
+      if (cmd === "list_faces_for_person") return [mockFace1];
+      return null;
+    });
+
+    render(<FacesView {...defaultProps} />);
+    await waitFor(() => {
+      expect(screen.getByText("Person 1")).toBeInTheDocument();
+    });
+
+    // Enter detail view
+    await userEvent.click(screen.getByText("Person 1").closest(".faces-card")!);
+    await waitFor(() => {
+      expect(screen.getByText("Back to People")).toBeInTheDocument();
+    });
+
+    // Click Back to People
+    await userEvent.click(screen.getByText("Back to People"));
+
+    // Should be back on person grid
+    await waitFor(() => {
+      expect(screen.getByText("Person 1")).toBeInTheDocument();
+      expect(screen.queryByText("Back to People")).not.toBeInTheDocument();
+    });
+  });
+
+  it("removes person from grid when last face unassigned", async () => {
+    const singleFacePerson: PersonInfo = { ...mockPerson, faceCount: 1 };
+    let personList = [singleFacePerson];
+
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_persons") return [...personList];
+      if (cmd === "list_faces_for_person") return [mockFace1];
+      if (cmd === "unassign_face_from_person") {
+        // Simulate backend: person gets deleted after last face removed
+        personList = [];
+        return null;
+      }
+      return null;
+    });
+
+    render(<FacesView {...defaultProps} />);
+    await waitFor(() => {
+      expect(screen.getByText("Person 1")).toBeInTheDocument();
+    });
+
+    // Enter detail view
+    await userEvent.click(screen.getByText("Person 1").closest(".faces-card")!);
+    await waitFor(() => {
+      expect(screen.getByText("face_a.jpg")).toBeInTheDocument();
+    });
+
+    // Remove the last face
+    await userEvent.click(screen.getByText("Remove"));
+
+    // Should return to person grid with empty state
+    await waitFor(() => {
+      expect(screen.getByText(/No faces clustered yet/)).toBeInTheDocument();
     });
   });
 });

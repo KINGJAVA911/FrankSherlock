@@ -7,6 +7,7 @@ import type {
   DeleteFilesResult,
   DuplicatesResponse,
   FaceDetectProgress,
+  FaceInfo,
   FaceStats,
   FileMetadata,
   FileProperties,
@@ -15,6 +16,7 @@ import type {
   PersonInfo,
   ProtectedPdfInfo,
   PurgeResult,
+  ReclusterProgress,
   RenameFileResult,
   RetryProtectedPdfsResult,
   RootInfo,
@@ -257,6 +259,14 @@ export async function clusterFaces(): Promise<ClusterResult> {
   return invoke<ClusterResult>("cluster_faces");
 }
 
+export async function reclusterFaces(): Promise<void> {
+  return invoke<void>("recluster_faces");
+}
+
+export async function getReclusterStatus(): Promise<ReclusterProgress | null> {
+  return invoke<ReclusterProgress | null>("get_recluster_status");
+}
+
 export async function listPersons(rootScope: number[] = []): Promise<PersonInfo[]> {
   return invoke<PersonInfo[]>("list_persons", { rootScope });
 }
@@ -267,4 +277,12 @@ export async function renamePerson(personId: number, newName: string): Promise<v
 
 export async function mergePersons(sourceId: number, targetId: number): Promise<void> {
   return invoke<void>("merge_persons", { sourceId, targetId });
+}
+
+export async function listFacesForPerson(personId: number): Promise<FaceInfo[]> {
+  return invoke<FaceInfo[]>("list_faces_for_person", { personId });
+}
+
+export async function unassignFaceFromPerson(faceId: number): Promise<void> {
+  return invoke<void>("unassign_face_from_person", { faceId });
 }

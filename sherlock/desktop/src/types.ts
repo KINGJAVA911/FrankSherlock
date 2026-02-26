@@ -314,3 +314,20 @@ export type ClusterResult = {
   newPersons: number;
   assignedFaces: number;
 };
+
+export type FaceInfo = {
+  id: number;
+  personId: number | null;
+  fileId: number;
+  relPath: string;
+  filename: string;
+  confidence: number;
+  cropPath?: string | null;
+};
+
+export type ReclusterProgress = {
+  phase: "crops" | "clustering" | "done";
+  total: number;
+  processed: number;
+  result: ClusterResult | null;
+};

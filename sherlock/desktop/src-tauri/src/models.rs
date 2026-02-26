@@ -502,3 +502,35 @@ pub struct ClusterResult {
     pub new_persons: u64,
     pub assigned_faces: u64,
 }
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceInfo {
+    pub id: i64,
+    pub person_id: Option<i64>,
+    pub file_id: i64,
+    pub rel_path: String,
+    pub filename: String,
+    pub confidence: f32,
+    pub crop_path: Option<String>,
+}
+
+/// A face that needs its crop regenerated.
+#[derive(Debug)]
+pub struct FaceCropJob {
+    pub face_id: i64,
+    pub bbox: [f32; 4], // [x1, y1, x2, y2]
+    pub abs_path: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReclusterProgress {
+    /// `"crops"` while regenerating missing crops, `"clustering"` during assignment + merge,
+    /// `"done"` when finished (briefly, before clearing).
+    pub phase: String,
+    pub total: u64,
+    pub processed: u64,
+    /// Populated once clustering finishes.
+    pub result: Option<ClusterResult>,
+}
