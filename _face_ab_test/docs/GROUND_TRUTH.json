@@ -1,0 +1,30 @@
+{
+  "_comment": "Manual face labels for test images. Fill this in after placing images in test_files/.",
+  "_format": {
+    "bbox_approx": "[x, y, width, height] in pixels — approximate bounding box",
+    "person": "A consistent label for the person (e.g. 'Person A', a name, etc.)",
+    "face_index": "images/{filename}:{face_index} — zero-based index per image"
+  },
+  "images": {
+    "example_group_photo.jpg": {
+      "faces": [
+        { "bbox_approx": [100, 50, 80, 100], "person": "Person A" },
+        { "bbox_approx": [300, 60, 75, 95], "person": "Person B" }
+      ]
+    },
+    "example_selfie.jpg": {
+      "faces": [
+        { "bbox_approx": [150, 80, 120, 150], "person": "Person A" }
+      ]
+    },
+    "example_portrait.jpg": {
+      "faces": [
+        { "bbox_approx": [200, 100, 100, 130], "person": "Person B" }
+      ]
+    }
+  },
+  "expected_clusters": {
+    "Person A": ["example_group_photo.jpg:0", "example_selfie.jpg:0"],
+    "Person B": ["example_group_photo.jpg:1", "example_portrait.jpg:0"]
+  }
+}

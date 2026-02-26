@@ -1,0 +1,68 @@
+{
+  "detection": {
+    "scrfd": {
+      "library": "insightface",
+      "model_pack": "buffalo_l",
+      "det_size": [640, 640],
+      "confidence_thresholds": [0.3, 0.5, 0.7, 0.8]
+    },
+    "mtcnn": {
+      "library": "facenet-pytorch",
+      "min_face_size": 20,
+      "thresholds": [0.6, 0.7, 0.7]
+    },
+    "retinaface": {
+      "library": "insightface",
+      "model_pack": "buffalo_l",
+      "note": "Uses insightface RetinaFace detector variant"
+    },
+    "yolov8_face": {
+      "library": "ultralytics",
+      "model": "yolov8n-face.pt",
+      "confidence_thresholds": [0.3, 0.5, 0.7, 0.8]
+    },
+    "mediapipe": {
+      "library": "mediapipe",
+      "model_selection": 1,
+      "min_detection_confidence": 0.5
+    }
+  },
+  "embedding": {
+    "arcface": {
+      "library": "insightface",
+      "model_pack": "buffalo_l",
+      "embedding_dim": 512
+    },
+    "facenet": {
+      "library": "facenet-pytorch",
+      "model": "vggface2",
+      "embedding_dim": 512
+    },
+    "adaface": {
+      "library": "deepface",
+      "model_name": "ArcFace",
+      "note": "DeepFace wraps ArcFace; use as AdaFace proxy for comparison"
+    }
+  },
+  "clustering": {
+    "chinese_whispers": {
+      "iterations": 20,
+      "similarity_threshold": 0.65
+    },
+    "dbscan": {
+      "eps_values": [0.4, 0.5, 0.6, 0.7, 0.8],
+      "min_samples": 2,
+      "metric": "cosine"
+    },
+    "hdbscan": {
+      "min_cluster_size_values": [2, 3, 5],
+      "min_samples": 2,
+      "metric": "euclidean"
+    }
+  },
+  "quality_filters": {
+    "min_confidence_thresholds": [0.3, 0.5, 0.7, 0.8],
+    "min_face_size_px": [32, 48, 64, 96],
+    "blur_threshold_laplacian": [50, 100, 200]
+  }
+}
