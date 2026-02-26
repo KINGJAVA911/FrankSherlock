@@ -301,3 +301,16 @@ export type FaceStats = {
   imagesScanned: number;
   imagesPending: number;
 };
+
+export type PersonInfo = {
+  id: number;
+  name: string;
+  faceCount: number;
+  cropPath?: string | null;
+  thumbnailPath?: string | null;
+};
+
+export type ClusterResult = {
+  newPersons: number;
+  assignedFaces: number;
+};

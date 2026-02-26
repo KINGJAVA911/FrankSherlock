@@ -43,6 +43,27 @@ pub fn parse_query(raw_query: &str) -> ParsedQuery {
         raw.to_string()
     };
 
+    // Extract face:id or face:"name" or face:name prefix
+    let mut person_id: Option<i64> = None;
+    let mut person_name: Option<String> = None;
+    let face_re = Regex::new(r#"(?i)\bface:(?:"([^"]+)"|(\S+))"#).expect("valid regex");
+    let working_query = if let Some(cap) = face_re.captures(&working_query) {
+        let val = cap
+            .get(1)
+            .or_else(|| cap.get(2))
+            .map(|m| m.as_str().to_string());
+        if let Some(ref v) = val {
+            if let Ok(id) = v.parse::<i64>() {
+                person_id = Some(id);
+            } else {
+                person_name = Some(v.clone());
+            }
+        }
+        face_re.replace(&working_query, "").trim().to_string()
+    } else {
+        working_query
+    };
+
     // Extract subdir:path or subdir:"path with spaces" prefix
     let mut subdir: Option<String> = None;
     let subdir_re = Regex::new(r#"(?i)\bsubdir:(?:"([^"]+)"|(\S+))"#).expect("valid regex");
@@ -94,6 +115,9 @@ pub fn parse_query(raw_query: &str) -> ParsedQuery {
     if subdir.is_some() {
         score += 0.2;
     }
+    if person_id.is_some() || person_name.is_some() {
+        score += 0.3;
+    }
 
     // Strip matched media keywords from query text, longest patterns first
     let mut query_text = working_query.clone();
@@ -115,6 +139,8 @@ pub fn parse_query(raw_query: &str) -> ParsedQuery {
         parser_confidence: score.clamp(0.0, 1.0),
         album_name,
         subdir,
+        person_id,
+        person_name,
     }
 }
 
@@ -395,5 +421,40 @@ mod tests {
         let parsed = parse_query("screenshot");
         assert!(parsed.media_types.contains(&"screenshot".to_string()));
         assert_eq!(parsed.query_text, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // face: prefix tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parses_face_prefix_numeric() {
+        let parsed = parse_query("face:42");
+        assert_eq!(parsed.person_id, Some(42));
+        assert!(parsed.person_name.is_none());
+        assert_eq!(parsed.query_text, "");
+    }
+
+    #[test]
+    fn parses_face_prefix_name() {
+        let parsed = parse_query("face:alice sunset");
+        assert!(parsed.person_id.is_none());
+        assert_eq!(parsed.person_name.as_deref(), Some("alice"));
+        assert_eq!(parsed.query_text, "sunset");
+    }
+
+    #[test]
+    fn parses_face_prefix_quoted_name() {
+        let parsed = parse_query("face:\"Fabio Akita\"");
+        assert!(parsed.person_id.is_none());
+        assert_eq!(parsed.person_name.as_deref(), Some("Fabio Akita"));
+        assert_eq!(parsed.query_text, "");
+    }
+
+    #[test]
+    fn no_face_prefix() {
+        let parsed = parse_query("beach sunset");
+        assert!(parsed.person_id.is_none());
+        assert!(parsed.person_name.is_none());
     }
 }

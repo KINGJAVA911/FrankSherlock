@@ -743,16 +743,12 @@ export default function App() {
         {faces.facesMode ? (
           <FacesView
             onBack={() => faces.setFacesMode(false)}
-            onPreview={(item) => {
-              clearSelection();
-              const idx = items.findIndex((i) => i.id === item.id);
-              if (idx >= 0) {
-                selectOnly(idx);
-                setPreviewOpen(true);
-              } else {
-                duplicates.setDupPreviewItems([item]);
-              }
+            onSelectPerson={(personId, personName) => {
+              faces.setFacesMode(false);
+              setQuery(personName ? `face:"${personName}"` : `face:${personId}`);
             }}
+            onNotice={setNotice}
+            onError={setError}
           />
         ) : pdfPasswordsMode ? (
           <PdfPasswordsView

@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   Album,
   AppPaths,
+  ClusterResult,
   DbStats,
   DeleteFilesResult,
   DuplicatesResponse,
@@ -11,6 +12,7 @@ import type {
   FileProperties,
   HealthStatus,
   PdfPassword,
+  PersonInfo,
   ProtectedPdfInfo,
   PurgeResult,
   RenameFileResult,
@@ -247,4 +249,22 @@ export async function getFaceStats(rootScope: number[] = []): Promise<FaceStats>
 
 export async function listFilesWithFaces(rootScope: number[] = []): Promise<SearchItem[]> {
   return invoke<SearchItem[]>("list_files_with_faces", { rootScope });
+}
+
+// ── Person / Clustering ─────────────────────────────────────────────
+
+export async function clusterFaces(): Promise<ClusterResult> {
+  return invoke<ClusterResult>("cluster_faces");
+}
+
+export async function listPersons(rootScope: number[] = []): Promise<PersonInfo[]> {
+  return invoke<PersonInfo[]>("list_persons", { rootScope });
+}
+
+export async function renamePerson(personId: number, newName: string): Promise<void> {
+  return invoke<void>("rename_person", { personId, newName });
+}
+
+export async function mergePersons(sourceId: number, targetId: number): Promise<void> {
+  return invoke<void>("merge_persons", { sourceId, targetId });
 }

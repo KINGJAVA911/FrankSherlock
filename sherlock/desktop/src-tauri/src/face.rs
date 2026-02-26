@@ -63,12 +63,15 @@ pub fn ensure_models(models_dir: &Path) -> AppResult<PathBuf> {
     std::fs::create_dir_all(&buffalo_dir)?;
 
     log::info!("Downloading InsightFace buffalo_l models...");
-    let resp = ureq::get(BUFFALO_L_URL)
+    let mut resp = ureq::get(BUFFALO_L_URL)
         .call()
         .map_err(|e| AppError::Config(format!("Failed to download buffalo_l models: {e}")))?;
 
+    // buffalo_l.zip is ~200MB; ureq defaults to 10MB limit
     let body = resp
-        .into_body()
+        .body_mut()
+        .with_config()
+        .limit(300 * 1024 * 1024)
         .read_to_vec()
         .map_err(|e| AppError::Config(format!("Failed to read buffalo_l download: {e}")))?;
 
@@ -104,8 +107,15 @@ pub fn ensure_models(models_dir: &Path) -> AppResult<PathBuf> {
 // ── FaceDetector ────────────────────────────────────────────────────
 
 impl FaceDetector {
+    #[allow(dead_code)]
     pub fn new(models_dir: &Path) -> AppResult<Self> {
         let buffalo_dir = ensure_models(models_dir)?;
+        Self::from_model_dir(&buffalo_dir)
+    }
+
+    /// Create a detector from a directory that already contains the ONNX model files.
+    /// Call `ensure_models()` first to download them if needed.
+    pub fn from_model_dir(buffalo_dir: &Path) -> AppResult<Self> {
         let det_path = buffalo_dir.join("det_10g.onnx");
         let rec_path = buffalo_dir.join("w600k_r50.onnx");
 
@@ -252,9 +262,14 @@ struct RawDetection {
     keypoints: [[f32; 2]; 5],
 }
 
-/// Helper to index a flat tensor buffer as a 3D array [dim0][dim1][dim2].
-fn idx3(shape: &[usize], d0: usize, d1: usize, d2: usize) -> usize {
-    d0 * shape[1] * shape[2] + d1 * shape[2] + d2
+/// Index into a tensor that may be 2D `[rows, cols]` or 3D `[1, rows, cols]`.
+/// Called as `tidx(shape, row, col)` — for 3D tensors the batch dim is assumed 0.
+fn tidx(shape: &[usize], row: usize, col: usize) -> usize {
+    match shape.len() {
+        2 => row * shape[1] + col,
+        3 => row * shape[2] + col, // batch dim 0, offset is the same
+        _ => panic!("unexpected SCRFD tensor rank: {}", shape.len()),
+    }
 }
 
 fn postprocess_scrfd(
@@ -295,25 +310,25 @@ fn postprocess_scrfd(
                 let anchor_cy = (row as f32 + 0.5) * stride as f32;
 
                 for _a in 0..num_anchors {
-                    let score = scores_data[idx3(&s_dims, 0, anchor_idx, 0)];
+                    let score = scores_data[tidx(&s_dims, anchor_idx, 0)];
                     if score > SCORE_THRESHOLD {
                         // distance2bbox
                         let x1 =
-                            anchor_cx - bbox_data[idx3(&b_dims, 0, anchor_idx, 0)] * stride as f32;
+                            anchor_cx - bbox_data[tidx(&b_dims, anchor_idx, 0)] * stride as f32;
                         let y1 =
-                            anchor_cy - bbox_data[idx3(&b_dims, 0, anchor_idx, 1)] * stride as f32;
+                            anchor_cy - bbox_data[tidx(&b_dims, anchor_idx, 1)] * stride as f32;
                         let x2 =
-                            anchor_cx + bbox_data[idx3(&b_dims, 0, anchor_idx, 2)] * stride as f32;
+                            anchor_cx + bbox_data[tidx(&b_dims, anchor_idx, 2)] * stride as f32;
                         let y2 =
-                            anchor_cy + bbox_data[idx3(&b_dims, 0, anchor_idx, 3)] * stride as f32;
+                            anchor_cy + bbox_data[tidx(&b_dims, anchor_idx, 3)] * stride as f32;
 
                         // distance2kps
                         let mut keypoints = [[0f32; 2]; 5];
                         for k in 0..5 {
                             keypoints[k][0] = anchor_cx
-                                + kps_data[idx3(&k_dims, 0, anchor_idx, k * 2)] * stride as f32;
+                                + kps_data[tidx(&k_dims, anchor_idx, k * 2)] * stride as f32;
                             keypoints[k][1] = anchor_cy
-                                + kps_data[idx3(&k_dims, 0, anchor_idx, k * 2 + 1)] * stride as f32;
+                                + kps_data[tidx(&k_dims, anchor_idx, k * 2 + 1)] * stride as f32;
                         }
 
                         // Map back from letterboxed coords to original image
@@ -584,20 +599,68 @@ pub fn init_ort_from_dir(lib_dir: &Path) -> AppResult<bool> {
     Ok(true)
 }
 
+// ── Face crop generation ────────────────────────────────────────────
+
+/// Generate a small JPEG face crop for display in the person grid.
+/// Takes the source image, bbox `[x1, y1, x2, y2]`, output directory, and face_id.
+/// Adds 20% padding around the face, resizes longest side to 150px.
+/// Returns the output path on success.
+pub fn generate_face_crop(
+    image_path: &Path,
+    bbox: &[f32; 4],
+    output_dir: &Path,
+    face_id: i64,
+) -> AppResult<PathBuf> {
+    let raw_img = image::open(image_path)
+        .map_err(|e| AppError::Config(format!("Failed to open image for face crop: {e}")))?;
+    let orientation = crate::exif::extract_orientation(image_path);
+    let img = crate::exif::apply_orientation(raw_img, orientation);
+
+    let (img_w, img_h) = (img.width() as f32, img.height() as f32);
+
+    let face_w = bbox[2] - bbox[0];
+    let face_h = bbox[3] - bbox[1];
+    let pad_x = face_w * 0.2;
+    let pad_y = face_h * 0.2;
+
+    let x1 = (bbox[0] - pad_x).max(0.0) as u32;
+    let y1 = (bbox[1] - pad_y).max(0.0) as u32;
+    let x2 = ((bbox[2] + pad_x).min(img_w)) as u32;
+    let y2 = ((bbox[3] + pad_y).min(img_h)) as u32;
+
+    let crop_w = x2.saturating_sub(x1).max(1);
+    let crop_h = y2.saturating_sub(y1).max(1);
+
+    let cropped = img.crop_imm(x1, y1, crop_w, crop_h);
+
+    // Resize longest side to 150px
+    let longest = crop_w.max(crop_h) as f32;
+    let scale = 150.0 / longest;
+    let new_w = ((crop_w as f32 * scale).round() as u32).max(1);
+    let new_h = ((crop_h as f32 * scale).round() as u32).max(1);
+    let resized = cropped.resize_exact(new_w, new_h, image::imageops::FilterType::Lanczos3);
+
+    let out_path = output_dir.join(format!("{face_id}.jpg"));
+    resized
+        .to_rgb8()
+        .save_with_format(&out_path, image::ImageFormat::Jpeg)
+        .map_err(|e| AppError::Config(format!("Failed to save face crop: {e}")))?;
+
+    Ok(out_path)
+}
+
 // ── Embedding helpers ───────────────────────────────────────────────
 
 pub fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
     embedding.iter().flat_map(|f| f.to_le_bytes()).collect()
 }
 
-#[allow(dead_code)] // Used by future clustering phase
 pub fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
     blob.chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }
 
-#[allow(dead_code)] // Used by future clustering phase
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
@@ -770,10 +833,18 @@ mod tests {
     }
 
     #[test]
-    fn idx3_indexing() {
-        let shape = [1, 3, 4];
-        assert_eq!(idx3(&shape, 0, 0, 0), 0);
-        assert_eq!(idx3(&shape, 0, 1, 0), 4);
-        assert_eq!(idx3(&shape, 0, 2, 3), 11);
+    fn tidx_3d() {
+        let shape = vec![1, 3, 4]; // [batch=1, rows=3, cols=4]
+        assert_eq!(tidx(&shape, 0, 0), 0);
+        assert_eq!(tidx(&shape, 1, 0), 4);
+        assert_eq!(tidx(&shape, 2, 3), 11);
+    }
+
+    #[test]
+    fn tidx_2d() {
+        let shape = vec![3, 4]; // [rows=3, cols=4]
+        assert_eq!(tidx(&shape, 0, 0), 0);
+        assert_eq!(tidx(&shape, 1, 0), 4);
+        assert_eq!(tidx(&shape, 2, 3), 11);
     }
 }

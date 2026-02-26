@@ -831,25 +831,37 @@ fn detect_faces(
 
     let db_path = state.paths.db_file.clone();
     let models_dir = state.paths.models_dir.clone();
+    let face_crops_dir = state.paths.face_crops_dir.clone();
     let progress_arc = state.face_detect_progress.clone();
     let cancel_flag = state.face_detect_cancel.clone();
     let ort_lib_dir = resolve_ort_lib(&app_handle);
 
     tauri::async_runtime::spawn(async move {
+        let progress_cleanup = progress_arc.clone();
         let result = tauri::async_runtime::spawn_blocking(move || {
             run_face_detection(
                 &db_path,
                 &models_dir,
                 &ort_lib_dir,
+                &face_crops_dir,
                 root_id,
-                progress_arc.clone(),
+                progress_arc,
                 &cancel_flag,
             )
         })
         .await;
 
-        if let Err(e) = result {
-            log::error!("Face detection task join error: {e}");
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => log::error!("Face detection failed: {e}"),
+            Err(e) => {
+                log::error!("Face detection task panicked: {e}");
+                // Clear progress so UI doesn't show stale state
+                let mut progress = progress_cleanup
+                    .lock()
+                    .expect("face progress mutex poisoned");
+                *progress = None;
+            }
         }
     });
 
@@ -889,6 +901,33 @@ fn get_face_stats(
     db::get_face_stats(&state.paths.db_file, &root_scope).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn cluster_faces(state: State<'_, AppState>) -> Result<models::ClusterResult, String> {
+    db::cluster_faces(&state.paths.db_file, 0.45).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_persons(
+    root_scope: Vec<i64>,
+    state: State<'_, AppState>,
+) -> Result<Vec<models::PersonInfo>, String> {
+    db::list_persons(&state.paths.db_file, &root_scope).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn rename_person(
+    person_id: i64,
+    new_name: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    db::rename_person(&state.paths.db_file, person_id, &new_name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn merge_persons(source_id: i64, target_id: i64, state: State<'_, AppState>) -> Result<(), String> {
+    db::merge_persons(&state.paths.db_file, source_id, target_id).map_err(|e| e.to_string())
+}
+
 fn resolve_ort_lib(app_handle: &tauri::AppHandle) -> std::path::PathBuf {
     let lib_name = face::onnxruntime_lib_name();
 
@@ -920,44 +959,54 @@ fn run_face_detection(
     db_path: &std::path::Path,
     models_dir: &std::path::Path,
     ort_lib_dir: &std::path::Path,
+    face_crops_dir: &std::path::Path,
     root_id: i64,
     progress_arc: Arc<Mutex<Option<models::FaceDetectProgress>>>,
     cancel_flag: &AtomicBool,
 ) -> Result<(), String> {
-    // Signal that we're downloading/loading models
-    {
-        let mut progress = progress_arc.lock().expect("face progress mutex poisoned");
+    /// Helper to set progress phase (avoids repetition).
+    fn set_phase(arc: &Arc<Mutex<Option<models::FaceDetectProgress>>>, root_id: i64, phase: &str) {
+        let mut progress = arc.lock().expect("face progress mutex poisoned");
         *progress = Some(models::FaceDetectProgress {
             root_id,
             total: 0,
             processed: 0,
             faces_found: 0,
-            phase: "downloading".into(),
+            phase: phase.into(),
         });
     }
 
-    // Initialize ONNX Runtime
-    let _ = face::init_ort_from_dir(ort_lib_dir).map_err(|e| {
-        log::warn!("ORT init: {e}");
-    });
-
-    // Update phase: loading ONNX sessions
-    {
-        let mut progress = progress_arc.lock().expect("face progress mutex poisoned");
-        *progress = Some(models::FaceDetectProgress {
-            root_id,
-            total: 0,
-            processed: 0,
-            faces_found: 0,
-            phase: "loading".into(),
-        });
-    }
-
-    // Load face detector (downloads models on first use)
-    let mut detector = face::FaceDetector::new(models_dir).map_err(|e| {
-        let mut progress = progress_arc.lock().expect("face progress mutex poisoned");
+    fn clear_progress(arc: &Arc<Mutex<Option<models::FaceDetectProgress>>>) {
+        let mut progress = arc.lock().expect("face progress mutex poisoned");
         *progress = None;
-        format!("Failed to initialize face detector: {e}")
+    }
+
+    // Phase 1: Download models if needed
+    set_phase(&progress_arc, root_id, "downloading");
+    let buffalo_dir = face::ensure_models(models_dir).map_err(|e| {
+        clear_progress(&progress_arc);
+        format!("Failed to download face models: {e}")
+    })?;
+
+    // Phase 2: Initialize ONNX Runtime + load sessions
+    set_phase(&progress_arc, root_id, "loading");
+    match face::init_ort_from_dir(ort_lib_dir) {
+        Ok(true) => log::info!("ONNX Runtime loaded from {}", ort_lib_dir.display()),
+        Ok(false) => {
+            clear_progress(&progress_arc);
+            return Err(format!(
+                "ONNX Runtime library not found in {}. Run scripts/download-onnxruntime.sh to install it.",
+                ort_lib_dir.display()
+            ));
+        }
+        Err(e) => {
+            clear_progress(&progress_arc);
+            return Err(format!("ONNX Runtime init failed: {e}"));
+        }
+    }
+    let mut detector = face::FaceDetector::from_model_dir(&buffalo_dir).map_err(|e| {
+        clear_progress(&progress_arc);
+        format!("Failed to load face detection model: {e}")
     })?;
 
     // Get list of files to process
@@ -1004,8 +1053,35 @@ fn run_face_detection(
                     let _ = db::mark_no_faces(db_path, file.id);
                 } else {
                     faces_found += faces.len() as u64;
-                    if let Err(e) = db::insert_face_detections(db_path, file.id, &faces) {
-                        log::warn!("Failed to insert faces for {}: {e}", file.rel_path);
+                    match db::insert_face_detections(db_path, file.id, &faces) {
+                        Ok(face_ids) => {
+                            // Generate face crops for each detected face
+                            for (face, face_id) in faces.iter().zip(face_ids.iter()) {
+                                match face::generate_face_crop(
+                                    abs_path,
+                                    &face.bbox,
+                                    face_crops_dir,
+                                    *face_id,
+                                ) {
+                                    Ok(crop_path) => {
+                                        let _ = db::update_face_crop_path(
+                                            db_path,
+                                            *face_id,
+                                            &crop_path.to_string_lossy(),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        log::warn!(
+                                            "Failed to generate face crop for face {}: {e}",
+                                            face_id
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to insert faces for {}: {e}", file.rel_path);
+                        }
                     }
                 }
             }
@@ -1038,6 +1114,23 @@ fn run_face_detection(
     }
 
     log::info!("Face detection complete: {processed}/{total} images, {faces_found} faces found");
+
+    // Auto-cluster faces into person groups
+    if faces_found > 0 {
+        match db::cluster_faces(db_path, 0.45) {
+            Ok(result) => {
+                log::info!(
+                    "Face clustering: {} new persons, {} faces assigned",
+                    result.new_persons,
+                    result.assigned_faces
+                );
+            }
+            Err(e) => {
+                log::warn!("Face clustering failed: {e}");
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -1440,7 +1533,11 @@ pub fn run() {
             get_face_detect_status,
             cancel_face_detect,
             get_face_stats,
-            list_files_with_faces
+            list_files_with_faces,
+            cluster_faces,
+            list_persons,
+            rename_person,
+            merge_persons
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

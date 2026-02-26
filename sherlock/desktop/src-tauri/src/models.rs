@@ -98,6 +98,10 @@ pub struct ParsedQuery {
     pub album_name: Option<String>,
     #[serde(default)]
     pub subdir: Option<String>,
+    #[serde(default)]
+    pub person_id: Option<i64>,
+    #[serde(default)]
+    pub person_name: Option<String>,
 }
 
 impl ParsedQuery {
@@ -112,6 +116,8 @@ impl ParsedQuery {
             parser_confidence: 0.2,
             album_name: None,
             subdir: None,
+            person_id: None,
+            person_name: None,
         }
     }
 }
@@ -478,4 +484,21 @@ pub struct FaceDetectResponse {
     pub total_images: u64,
     pub processed: u64,
     pub total_faces: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonInfo {
+    pub id: i64,
+    pub name: String,
+    pub face_count: u64,
+    pub crop_path: Option<String>,
+    pub thumbnail_path: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterResult {
+    pub new_persons: u64,
+    pub assigned_faces: u64,
 }
