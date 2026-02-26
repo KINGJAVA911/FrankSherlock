@@ -814,6 +814,7 @@ export default function App() {
         isScanning={isScanning}
         runningScansCount={runningScansCount}
         selectedCount={selectedIndices.size}
+        faceProgress={faces.faceProgress}
         onShowModelInfo={() => setShowModelInfo(true)}
       />
 

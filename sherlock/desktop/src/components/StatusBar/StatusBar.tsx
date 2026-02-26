@@ -1,4 +1,4 @@
-import type { RuntimeStatus } from "../../types";
+import type { FaceDetectProgress, RuntimeStatus } from "../../types";
 import "./StatusBar.css";
 
 declare const __APP_VERSION__: string;
@@ -8,10 +8,11 @@ type Props = {
   isScanning: boolean;
   runningScansCount: number;
   selectedCount: number;
+  faceProgress: FaceDetectProgress | null;
   onShowModelInfo?: () => void;
 };
 
-export default function StatusBar({ runtime, isScanning, runningScansCount, selectedCount, onShowModelInfo }: Props) {
+export default function StatusBar({ runtime, isScanning, runningScansCount, selectedCount, faceProgress, onShowModelInfo }: Props) {
   return (
     <div className="statusbar">
       <span>Model: {runtime?.currentModel || "none"}</span>
@@ -30,6 +31,15 @@ export default function StatusBar({ runtime, isScanning, runningScansCount, sele
       </span>
       {isScanning && (
         <span>Scanning: {runningScansCount} active job(s)</span>
+      )}
+      {faceProgress && (
+        <span className="statusbar-face-progress">
+          {faceProgress.phase === "downloading"
+            ? "Downloading face models..."
+            : faceProgress.phase === "loading"
+              ? "Loading face models..."
+              : `Faces: ${faceProgress.processed}/${faceProgress.total} (${faceProgress.facesFound} found)`}
+        </span>
       )}
       {selectedCount > 0 && (
         <span>{selectedCount} selected</span>

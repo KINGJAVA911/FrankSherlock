@@ -11,6 +11,7 @@ describe("StatusBar", () => {
         isScanning={false}
         runningScansCount={0}
         selectedCount={0}
+        faceProgress={null}
       />
     );
     expect(screen.getByText(/2048\/8192 MiB/)).toBeInTheDocument();
@@ -23,6 +24,7 @@ describe("StatusBar", () => {
         isScanning={false}
         runningScansCount={0}
         selectedCount={0}
+        faceProgress={null}
       />
     );
     expect(screen.getByText(/n\/a/)).toBeInTheDocument();
@@ -35,6 +37,7 @@ describe("StatusBar", () => {
         isScanning={true}
         runningScansCount={2}
         selectedCount={0}
+        faceProgress={null}
       />
     );
     expect(screen.getByText(/2 active job/)).toBeInTheDocument();
@@ -47,6 +50,7 @@ describe("StatusBar", () => {
         isScanning={false}
         runningScansCount={0}
         selectedCount={5}
+        faceProgress={null}
       />
     );
     expect(screen.getByText("5 selected")).toBeInTheDocument();
@@ -59,6 +63,7 @@ describe("StatusBar", () => {
         isScanning={false}
         runningScansCount={0}
         selectedCount={0}
+        faceProgress={null}
       />
     );
     const modelSpan = screen.getByText(/llama3/);
@@ -77,10 +82,64 @@ describe("StatusBar", () => {
         isScanning={false}
         runningScansCount={0}
         selectedCount={0}
+        faceProgress={null}
         onShowModelInfo={onShowModelInfo}
       />
     );
     await user.click(screen.getByTitle("Click for model & hardware details"));
     expect(onShowModelInfo).toHaveBeenCalledOnce();
+  });
+
+  it("shows face detection progress when active", () => {
+    render(
+      <StatusBar
+        runtime={null}
+        isScanning={false}
+        runningScansCount={0}
+        selectedCount={0}
+        faceProgress={{ rootId: 1, total: 200, processed: 75, facesFound: 12, phase: "detecting" }}
+      />
+    );
+    expect(screen.getByText(/Faces: 75\/200/)).toBeInTheDocument();
+    expect(screen.getByText(/12 found/)).toBeInTheDocument();
+  });
+
+  it("shows downloading phase for face models", () => {
+    render(
+      <StatusBar
+        runtime={null}
+        isScanning={false}
+        runningScansCount={0}
+        selectedCount={0}
+        faceProgress={{ rootId: 1, total: 0, processed: 0, facesFound: 0, phase: "downloading" }}
+      />
+    );
+    expect(screen.getByText("Downloading face models...")).toBeInTheDocument();
+  });
+
+  it("shows loading phase for face models", () => {
+    render(
+      <StatusBar
+        runtime={null}
+        isScanning={false}
+        runningScansCount={0}
+        selectedCount={0}
+        faceProgress={{ rootId: 1, total: 0, processed: 0, facesFound: 0, phase: "loading" }}
+      />
+    );
+    expect(screen.getByText("Loading face models...")).toBeInTheDocument();
+  });
+
+  it("hides face detection when progress is null", () => {
+    render(
+      <StatusBar
+        runtime={null}
+        isScanning={false}
+        runningScansCount={0}
+        selectedCount={0}
+        faceProgress={null}
+      />
+    );
+    expect(screen.queryByText(/Faces:/)).not.toBeInTheDocument();
   });
 });

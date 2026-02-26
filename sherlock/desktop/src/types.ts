@@ -292,6 +292,7 @@ export type FaceDetectProgress = {
   total: number;
   processed: number;
   facesFound: number;
+  phase: "downloading" | "loading" | "detecting";
 };
 
 export type FaceStats = {

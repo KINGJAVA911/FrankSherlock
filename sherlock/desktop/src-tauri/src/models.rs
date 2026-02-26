@@ -466,6 +466,9 @@ pub struct FaceDetectProgress {
     pub total: u64,
     pub processed: u64,
     pub faces_found: u64,
+    /// `"downloading"` while fetching models, `"loading"` while initializing
+    /// ONNX sessions, `"detecting"` while processing images.
+    pub phase: String,
 }
 
 #[allow(dead_code)] // Used by future clustering/person-naming API

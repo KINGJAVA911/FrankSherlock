@@ -149,7 +149,19 @@ export default function RootCard({ root, isSelected, scan, readOnly, faceProgres
           )}
         </div>
       )}
-      {faceProgress && (
+      {faceProgress && faceProgress.phase === "downloading" && (
+        <div className="root-card-scan">
+          <div className="root-card-discovery-bar" />
+          <span>Downloading face models...</span>
+        </div>
+      )}
+      {faceProgress && faceProgress.phase === "loading" && (
+        <div className="root-card-scan">
+          <div className="root-card-discovery-bar" />
+          <span>Loading face models...</span>
+        </div>
+      )}
+      {faceProgress && faceProgress.phase === "detecting" && (
         <div className="root-card-scan">
           <progress value={faceProgress.processed} max={faceProgress.total} />
           <span>Detecting faces {faceProgress.processed}/{faceProgress.total} ({faceProgress.facesFound} found)</span>

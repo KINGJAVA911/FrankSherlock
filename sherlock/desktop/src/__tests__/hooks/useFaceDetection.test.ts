@@ -74,7 +74,7 @@ describe("useFaceDetection", () => {
   });
 
   it("polls face detection status", async () => {
-    const progress = { rootId: 1, total: 100, processed: 50, facesFound: 10 };
+    const progress = { rootId: 1, total: 100, processed: 50, facesFound: 10, phase: "detecting" as const };
     vi.mocked(getFaceDetectStatus).mockResolvedValue(progress);
 
     const { result } = renderHook(() => useFaceDetection(callbacks));

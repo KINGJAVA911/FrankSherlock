@@ -924,12 +924,36 @@ fn run_face_detection(
     progress_arc: Arc<Mutex<Option<models::FaceDetectProgress>>>,
     cancel_flag: &AtomicBool,
 ) -> Result<(), String> {
+    // Signal that we're downloading/loading models
+    {
+        let mut progress = progress_arc.lock().expect("face progress mutex poisoned");
+        *progress = Some(models::FaceDetectProgress {
+            root_id,
+            total: 0,
+            processed: 0,
+            faces_found: 0,
+            phase: "downloading".into(),
+        });
+    }
+
     // Initialize ONNX Runtime
     let _ = face::init_ort_from_dir(ort_lib_dir).map_err(|e| {
         log::warn!("ORT init: {e}");
     });
 
-    // Load face detector
+    // Update phase: loading ONNX sessions
+    {
+        let mut progress = progress_arc.lock().expect("face progress mutex poisoned");
+        *progress = Some(models::FaceDetectProgress {
+            root_id,
+            total: 0,
+            processed: 0,
+            faces_found: 0,
+            phase: "loading".into(),
+        });
+    }
+
+    // Load face detector (downloads models on first use)
     let mut detector = face::FaceDetector::new(models_dir).map_err(|e| {
         let mut progress = progress_arc.lock().expect("face progress mutex poisoned");
         *progress = None;
@@ -945,7 +969,7 @@ fn run_face_detection(
 
     let total = files.len() as u64;
 
-    // Set initial progress
+    // Set initial detecting progress
     {
         let mut progress = progress_arc.lock().expect("face progress mutex poisoned");
         *progress = Some(models::FaceDetectProgress {
@@ -953,6 +977,7 @@ fn run_face_detection(
             total,
             processed: 0,
             faces_found: 0,
+            phase: "detecting".into(),
         });
     }
 
@@ -1001,6 +1026,7 @@ fn run_face_detection(
                 total,
                 processed,
                 faces_found,
+                phase: "detecting".into(),
             });
         }
     }
