@@ -98,6 +98,35 @@ export default function PreviewModal({
   // Reset error when navigating to a different item
   useEffect(() => { setVideoError(false); }, [videoItem?.absPath]);
 
+  // Keyboard: Space closes preview, arrows navigate (single-item only)
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || tag === "VIDEO") return;
+
+      if (e.key === " ") {
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+        return;
+      }
+
+      if (singlePreviewIndex !== null) {
+        if (e.key === "ArrowLeft" && singlePreviewIndex > 0) {
+          e.preventDefault();
+          e.stopPropagation();
+          onNavigate(singlePreviewIndex - 1);
+        } else if (e.key === "ArrowRight" && singlePreviewIndex < totalItems - 1) {
+          e.preventDefault();
+          e.stopPropagation();
+          onNavigate(singlePreviewIndex + 1);
+        }
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => document.removeEventListener("keydown", handleKeyDown, true);
+  }, [onClose, onNavigate, singlePreviewIndex, totalItems]);
+
   return (
     <ModalOverlay className="preview-overlay" onBackdropClick={onClose}>
       <div className="preview-modal" onClick={(e) => e.stopPropagation()}>

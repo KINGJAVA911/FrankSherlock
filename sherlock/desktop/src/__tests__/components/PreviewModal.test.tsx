@@ -235,4 +235,73 @@ describe("PreviewModal", () => {
     );
     expect(container.querySelector(".preview-pdf-wrap")).not.toBeNull();
   });
+
+  it("Space key closes preview", () => {
+    const onClose = vi.fn();
+    render(
+      <PreviewModal
+        previewItems={[item]}
+        selectedCount={1}
+        singlePreviewIndex={5}
+        totalItems={10}
+        onClose={onClose}
+        onNavigate={() => {}}
+      />,
+    );
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: " ", bubbles: true }));
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("ArrowRight navigates to next item", () => {
+    const onNavigate = vi.fn();
+    render(
+      <PreviewModal
+        previewItems={[item]}
+        selectedCount={1}
+        singlePreviewIndex={5}
+        totalItems={10}
+        onClose={() => {}}
+        onNavigate={onNavigate}
+      />,
+    );
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    expect(onNavigate).toHaveBeenCalledWith(6);
+  });
+
+  it("ArrowLeft navigates to previous item", () => {
+    const onNavigate = vi.fn();
+    render(
+      <PreviewModal
+        previewItems={[item]}
+        selectedCount={1}
+        singlePreviewIndex={5}
+        totalItems={10}
+        onClose={() => {}}
+        onNavigate={onNavigate}
+      />,
+    );
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+    expect(onNavigate).toHaveBeenCalledWith(4);
+  });
+
+  it("arrows ignored for collage (singlePreviewIndex=null)", () => {
+    const onNavigate = vi.fn();
+    const items = [
+      item,
+      { ...item, id: 2, relPath: "photos/beach.jpg", absPath: "/home/user/photos/beach.jpg" },
+    ];
+    render(
+      <PreviewModal
+        previewItems={items}
+        selectedCount={2}
+        singlePreviewIndex={null}
+        totalItems={10}
+        onClose={() => {}}
+        onNavigate={onNavigate}
+      />,
+    );
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+    expect(onNavigate).not.toHaveBeenCalled();
+  });
 });

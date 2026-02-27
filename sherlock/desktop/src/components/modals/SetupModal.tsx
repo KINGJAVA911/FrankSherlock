@@ -1,3 +1,4 @@
+import { openUrl } from "@tauri-apps/plugin-opener";
 import type { SetupStatus } from "../../types";
 import ModalOverlay from "./ModalOverlay";
 import "./shared-modal.css";
@@ -11,6 +12,18 @@ type Props = {
   onClose?: () => void;
 };
 
+function ExternalLink({ url, children }: { url: string; children: React.ReactNode }) {
+  return (
+    <a
+      href="#"
+      className="setup-link"
+      onClick={(e) => { e.preventDefault(); openUrl(url); }}
+    >
+      {children}
+    </a>
+  );
+}
+
 export default function SetupModal({ setup, onRecheck, onDownload, onSetupOcr, onClose }: Props) {
   const ocrStatusText = setup.suryaVenvOk
     ? `Ready${setup.pythonVersion ? ` (Python ${setup.pythonVersion})` : ""}`
@@ -18,7 +31,7 @@ export default function SetupModal({ setup, onRecheck, onDownload, onSetupOcr, o
       ? "Python found, needs setup"
       : setup.pythonAvailable
         ? "Python found, venv issue"
-        : "Not available";
+        : null;
 
   const canSetupOcr =
     setup.systemPythonFound &&
@@ -33,7 +46,7 @@ export default function SetupModal({ setup, onRecheck, onDownload, onSetupOcr, o
         <div className="setup-status-grid">
           <div>
             <strong>Ollama</strong>
-            <p>{setup.ollamaAvailable ? "Running" : "Not detected"}</p>
+            <p>{setup.ollamaAvailable ? "Running" : <>Not detected — <ExternalLink url="https://ollama.com/download">install</ExternalLink></>}</p>
           </div>
           <div>
             <strong>Model ({setup.modelTier})</strong>
@@ -45,7 +58,7 @@ export default function SetupModal({ setup, onRecheck, onDownload, onSetupOcr, o
           </div>
           <div>
             <strong>OCR (Surya)</strong>
-            <p>{ocrStatusText}</p>
+            <p>{ocrStatusText ?? <>Not available — <ExternalLink url="https://www.python.org/downloads/">install Python</ExternalLink></>}</p>
           </div>
           <div>
             <strong>Video (ffmpeg)</strong>

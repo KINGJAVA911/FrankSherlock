@@ -56,3 +56,9 @@
   font-size: var(--font-size-sm);
   min-height: 16px;
 }
+
+.setup-link {
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}

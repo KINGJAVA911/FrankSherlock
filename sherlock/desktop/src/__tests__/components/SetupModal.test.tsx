@@ -107,4 +107,21 @@ describe("SetupModal", () => {
     expect(screen.getByText("Installing surya-ocr...")).toBeInTheDocument();
     expect(screen.getByText("50.0%")).toBeInTheDocument();
   });
+
+  it("shows install link when Ollama not detected", () => {
+    const noOllama = { ...mockSetup, ollamaAvailable: false };
+    render(<SetupModal setup={noOllama} onRecheck={() => {}} onDownload={() => {}} onSetupOcr={() => {}} />);
+    const link = screen.getByText("install");
+    expect(link).toBeInTheDocument();
+    expect(link.tagName).toBe("A");
+    expect(link).toHaveClass("setup-link");
+  });
+
+  it("shows install Python link when OCR not available", () => {
+    render(<SetupModal setup={mockSetup} onRecheck={() => {}} onDownload={() => {}} onSetupOcr={() => {}} />);
+    const link = screen.getByText("install Python");
+    expect(link).toBeInTheDocument();
+    expect(link.tagName).toBe("A");
+    expect(link).toHaveClass("setup-link");
+  });
 });
