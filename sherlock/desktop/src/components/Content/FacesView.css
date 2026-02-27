@@ -226,20 +226,27 @@
   color: var(--text-secondary);
 }
 
-.faces-detail-remove {
-  padding: 2px 6px;
-  margin-top: 4px;
-  border: 1px solid var(--border-primary);
-  border-radius: var(--radius-sm);
-  background: var(--bg-input);
-  color: var(--text-secondary);
+.faces-detail-crop-clickable {
   cursor: pointer;
-  font-family: inherit;
-  font-size: 0.65rem;
 }
 
-.faces-detail-remove:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
+.faces-detail-crop-clickable:hover {
+  opacity: 0.85;
+}
+
+/* ── Selected state ──────────────────────────────────────── */
+.faces-detail-card.selected {
   border-color: var(--border-focus);
+  background: color-mix(in srgb, var(--border-focus) 10%, var(--bg-surface));
+}
+
+/* ── Hover scrubbing ─────────────────────────────────────── */
+.faces-card.scrubbing {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 1px var(--border-focus);
+}
+
+.faces-card.scrubbing .faces-card-crop img {
+  border-radius: 4px;
+  transition: none;
 }

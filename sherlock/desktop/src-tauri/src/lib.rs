@@ -379,9 +379,19 @@ fn delete_files(
         }
     }
 
-    // Phase 3: only remove DB records for files successfully deleted from disk
+    // Phase 3: collect face crop paths before DB cascade deletes face_detections
+    let face_crop_paths =
+        db::collect_face_crop_paths_for_files(&state.paths.db_file, &fs_deleted_ids)
+            .unwrap_or_default();
+
+    // Phase 4: only remove DB records for files successfully deleted from disk
     if let Err(e) = db::delete_file_records(&state.paths.db_file, &fs_deleted_ids) {
         errors.push(format!("DB cleanup error: {e}"));
+    }
+
+    // Phase 5: best-effort face crop cleanup
+    for cp in &face_crop_paths {
+        let _ = std::fs::remove_file(cp);
     }
 
     Ok(DeleteFilesResult {
@@ -1083,6 +1093,27 @@ fn unassign_face_from_person(face_id: i64, state: State<'_, AppState>) -> Result
     db::unassign_face_from_person(&state.paths.db_file, face_id).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn reassign_faces_to_person(
+    face_ids: Vec<i64>,
+    target_person_id: i64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    require_writable(&state)?;
+    db::reassign_faces_to_person(&state.paths.db_file, &face_ids, target_person_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_representative_face(
+    person_id: i64,
+    face_id: i64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    require_writable(&state)?;
+    db::set_representative_face(&state.paths.db_file, person_id, face_id).map_err(|e| e.to_string())
+}
+
 fn resolve_ort_lib(app_handle: &tauri::AppHandle) -> std::path::PathBuf {
     let lib_name = face::onnxruntime_lib_name();
 
@@ -1704,7 +1735,9 @@ pub fn run() {
             rename_person,
             merge_persons,
             list_faces_for_person,
-            unassign_face_from_person
+            unassign_face_from_person,
+            reassign_faces_to_person,
+            set_representative_face
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

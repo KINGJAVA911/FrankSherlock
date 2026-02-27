@@ -2,7 +2,7 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   cancelScan, copyFilesToClipboard, deleteFiles, ensureDatabase,
-  getCliFolderPath, getFileMetadata, listRoots,
+  getCliFolderPath, getFileMetadata, getFileProperties, listRoots,
   removeRoot, renameFile, reorderRoots, startScan, updateFileMetadata,
 } from "./api";
 import type {
@@ -81,6 +81,7 @@ export default function App() {
   const [renameItem, setRenameItem] = useState<SearchItem | null>(null);
   const [showModelInfo, setShowModelInfo] = useState(false);
   const [editMetadataItem, setEditMetadataItem] = useState<SearchItem | null>(null);
+  const [facePreviewItems, setFacePreviewItems] = useState<SearchItem[]>([]);
   const [propertiesItem, setPropertiesItem] = useState<SearchItem | null>(null);
   const [forceShowSetup, setForceShowSetup] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -588,6 +589,16 @@ export default function App() {
           onNavigate={() => {}}
         />
       )}
+      {facePreviewItems.length > 0 && (
+        <PreviewModal
+          previewItems={facePreviewItems}
+          selectedCount={1}
+          singlePreviewIndex={null}
+          totalItems={1}
+          onClose={() => setFacePreviewItems([])}
+          onNavigate={() => {}}
+        />
+      )}
       {showHelp && <HelpModal onClose={() => setShowHelp(false)} />}
       {showModelInfo && runtime && (
         <ModelInfoModal runtime={runtime} setup={setup} onClose={() => setShowModelInfo(false)} />
@@ -746,6 +757,29 @@ export default function App() {
             onSelectPerson={(personId, personName) => {
               faces.setFacesMode(false);
               setQuery(personName ? `face:"${personName}"` : `face:${personId}`);
+            }}
+            onPreviewFile={async (fileIds) => {
+              try {
+                const items = await Promise.all(
+                  fileIds.slice(0, 10).map(async (fileId) => {
+                    const props = await getFileProperties(fileId);
+                    return {
+                      id: props.id,
+                      rootId: 0,
+                      relPath: props.relPath,
+                      absPath: props.absPath,
+                      mediaType: props.mediaType,
+                      description: props.description,
+                      confidence: props.confidence,
+                      mtimeNs: props.mtimeNs,
+                      sizeBytes: props.sizeBytes,
+                    } as SearchItem;
+                  }),
+                );
+                setFacePreviewItems(items);
+              } catch (err) {
+                setError(errorMessage(err));
+              }
             }}
             onNotice={setNotice}
             onError={setError}

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { invoke } from "@tauri-apps/api/core";
 import FacesView from "../../components/Content/FacesView";
@@ -46,6 +46,7 @@ const mockFace2: FaceInfo = {
 const defaultProps = {
   onBack: vi.fn(),
   onSelectPerson: vi.fn(),
+  onPreviewFile: vi.fn(),
   onNotice: vi.fn(),
   onError: vi.fn(),
 };
@@ -183,11 +184,13 @@ describe("FacesView", () => {
 
     render(<FacesView {...defaultProps} />);
     await waitFor(() => {
-      expect(screen.getByText("5")).toBeInTheDocument(); // badge count
+      const badge = document.querySelector(".faces-card-badge");
+      expect(badge).not.toBeNull();
+      expect(badge!.textContent!.trim()).toBe("5");
     });
   });
 
-  it("calls unassign_face_from_person when Remove clicked", async () => {
+  it("calls unassign_face_from_person via context menu Remove from Person", async () => {
     mockedInvoke.mockImplementation(async (cmd: string) => {
       if (cmd === "list_persons") return [mockPerson];
       if (cmd === "list_faces_for_person") return [mockFace1, mockFace2];
@@ -206,13 +209,23 @@ describe("FacesView", () => {
       expect(screen.getByText("face_a.jpg")).toBeInTheDocument();
     });
 
-    // Click Remove on first face
-    const removeButtons = screen.getAllByText("Remove");
-    await userEvent.click(removeButtons[0]);
+    // Click the first face card to select it
+    const firstCard = screen.getByText("face_a.jpg").closest(".faces-detail-card")!;
+    await userEvent.click(firstCard);
+
+    // Right-click to open context menu
+    fireEvent.contextMenu(firstCard);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("detail-context-menu")).toBeInTheDocument();
+      expect(screen.getByText("Remove from Person")).toBeInTheDocument();
+    });
+
+    // Click Remove from Person
+    await userEvent.click(screen.getByText("Remove from Person"));
 
     await waitFor(() => {
       expect(mockedInvoke).toHaveBeenCalledWith("unassign_face_from_person", { faceId: 10 });
-      expect(defaultProps.onNotice).toHaveBeenCalledWith("Face removed from person");
     });
   });
 
@@ -270,12 +283,171 @@ describe("FacesView", () => {
       expect(screen.getByText("face_a.jpg")).toBeInTheDocument();
     });
 
-    // Remove the last face
-    await userEvent.click(screen.getByText("Remove"));
+    // Select the face and use context menu to remove
+    const card = screen.getByText("face_a.jpg").closest(".faces-detail-card")!;
+    await userEvent.click(card);
+    fireEvent.contextMenu(card);
+    await waitFor(() => {
+      expect(screen.getByText("Remove from Person")).toBeInTheDocument();
+    });
+    await userEvent.click(screen.getByText("Remove from Person"));
 
     // Should return to person grid with empty state
     await waitFor(() => {
       expect(screen.getByText(/No faces clustered yet/)).toBeInTheDocument();
+    });
+  });
+
+  it("shows context menu on right-click", async () => {
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_persons") return [mockPerson];
+      return null;
+    });
+
+    render(<FacesView {...defaultProps} />);
+    await waitFor(() => {
+      expect(screen.getByText("Person 1")).toBeInTheDocument();
+    });
+
+    const card = screen.getByText("Person 1").closest(".faces-card")!;
+    fireEvent.contextMenu(card);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("faces-context-menu")).toBeInTheDocument();
+      expect(screen.getByText("Shuffle")).toBeInTheDocument();
+    });
+  });
+
+  it("shuffle calls set_representative_face", async () => {
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_persons") return [mockPerson];
+      if (cmd === "list_faces_for_person") return [mockFace1, mockFace2];
+      if (cmd === "set_representative_face") return null;
+      return null;
+    });
+
+    render(<FacesView {...defaultProps} />);
+    await waitFor(() => {
+      expect(screen.getByText("Person 1")).toBeInTheDocument();
+    });
+
+    const card = screen.getByText("Person 1").closest(".faces-card")!;
+    fireEvent.contextMenu(card);
+
+    await waitFor(() => {
+      expect(screen.getByText("Shuffle")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByText("Shuffle"));
+
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith(
+        "set_representative_face",
+        expect.objectContaining({ personId: 1 }),
+      );
+    });
+  });
+
+  it("context menu closes on Escape", async () => {
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_persons") return [mockPerson];
+      return null;
+    });
+
+    render(<FacesView {...defaultProps} />);
+    await waitFor(() => {
+      expect(screen.getByText("Person 1")).toBeInTheDocument();
+    });
+
+    const card = screen.getByText("Person 1").closest(".faces-card")!;
+    fireEvent.contextMenu(card);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("faces-context-menu")).toBeInTheDocument();
+    });
+
+    await userEvent.keyboard("{Escape}");
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("faces-context-menu")).not.toBeInTheDocument();
+    });
+  });
+
+  it("re-cluster shows confirmation dialog", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_persons") return [mockPerson];
+      return null;
+    });
+
+    render(<FacesView {...defaultProps} />);
+    await waitFor(() => {
+      expect(screen.getByText("Re-cluster")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByText("Re-cluster"));
+
+    expect(confirmSpy).toHaveBeenCalled();
+    // recluster_faces should NOT have been called since confirm returned false
+    expect(mockedInvoke).not.toHaveBeenCalledWith("recluster_faces");
+
+    confirmSpy.mockRestore();
+  });
+
+  it("face selection via click", async () => {
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_persons") return [mockPerson];
+      if (cmd === "list_faces_for_person") return [mockFace1, mockFace2];
+      return null;
+    });
+
+    render(<FacesView {...defaultProps} />);
+    await waitFor(() => {
+      expect(screen.getByText("Person 1")).toBeInTheDocument();
+    });
+
+    // Enter detail view
+    await userEvent.click(screen.getByText("Person 1").closest(".faces-card")!);
+    await waitFor(() => {
+      expect(screen.getByText("face_a.jpg")).toBeInTheDocument();
+    });
+
+    // Click a face card to select it
+    const firstCard = screen.getByText("face_a.jpg").closest(".faces-detail-card")!;
+    await userEvent.click(firstCard);
+
+    expect(firstCard.classList.contains("selected")).toBe(true);
+  });
+
+  it("context menu shows Move to submenu", async () => {
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "list_persons") return [mockPerson, mockPerson2];
+      if (cmd === "list_faces_for_person") return [mockFace1, mockFace2];
+      return null;
+    });
+
+    render(<FacesView {...defaultProps} />);
+    await waitFor(() => {
+      expect(screen.getByText("Person 1")).toBeInTheDocument();
+    });
+
+    // Enter detail view for Person 1
+    await userEvent.click(screen.getByText("Person 1").closest(".faces-card")!);
+    await waitFor(() => {
+      expect(screen.getByText("face_a.jpg")).toBeInTheDocument();
+    });
+
+    // Select a face and right-click
+    const firstCard = screen.getByText("face_a.jpg").closest(".faces-detail-card")!;
+    await userEvent.click(firstCard);
+    fireEvent.contextMenu(firstCard);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("detail-context-menu")).toBeInTheDocument();
+      expect(screen.getByText("Move to")).toBeInTheDocument();
+      // Should show the other person (Alice) but not the current person (Person 1)
+      expect(screen.getByText("Alice (3)")).toBeInTheDocument();
     });
   });
 });

@@ -1156,12 +1156,23 @@ pub fn purge_root(db_path: &Path, root_id: i64) -> AppResult<PurgeResult> {
     let file_ids: Vec<i64> = file_rows.iter().map(|(id, _)| *id).collect();
     let thumb_paths: Vec<String> = file_rows.iter().filter_map(|(_, tp)| tp.clone()).collect();
 
+    // Collect face crop paths before CASCADE deletes face_detections rows
+    let mut crop_stmt = tx.prepare(
+        "SELECT fd.crop_path FROM face_detections fd
+         JOIN files f ON f.id = fd.file_id
+         WHERE f.root_id = ?1 AND fd.crop_path IS NOT NULL",
+    )?;
+    let face_crop_paths: Vec<String> = crop_stmt
+        .query_map(params![root_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(crop_stmt);
+
     // Delete FTS entries
     for id in &file_ids {
         tx.execute("DELETE FROM files_fts WHERE rowid = ?1", params![id])?;
     }
 
-    // Delete files
+    // Delete files (CASCADE removes face_detections)
     let files_removed = tx.execute("DELETE FROM files WHERE root_id = ?1", params![root_id])?;
 
     // Delete scan jobs
@@ -1179,6 +1190,11 @@ pub fn purge_root(db_path: &Path, root_id: i64) -> AppResult<PurgeResult> {
         if path.exists() && std::fs::remove_file(path).is_ok() {
             thumbs_cleaned += 1;
         }
+    }
+
+    // Best-effort face crop cleanup (outside transaction)
+    for cp in &face_crop_paths {
+        let _ = std::fs::remove_file(cp);
     }
 
     Ok(PurgeResult {
@@ -1320,6 +1336,48 @@ pub fn collect_files_for_delete(
         }
     }
     Ok(results)
+}
+
+/// Collect face crop paths for the given file IDs (for cleanup before DB delete).
+pub fn collect_face_crop_paths_for_files(
+    db_path: &Path,
+    file_ids: &[i64],
+) -> AppResult<Vec<String>> {
+    if file_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let conn = open_conn(db_path)?;
+    let mut paths = Vec::new();
+    for &fid in file_ids {
+        let mut stmt = conn.prepare(
+            "SELECT crop_path FROM face_detections WHERE file_id = ?1 AND crop_path IS NOT NULL",
+        )?;
+        let rows = stmt.query_map(params![fid], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            paths.push(row?);
+        }
+    }
+    Ok(paths)
+}
+
+/// Collect face crop paths for files marked deleted at a specific timestamp (for scan cleanup).
+pub fn get_face_crop_paths_for_deleted(
+    db_path: &Path,
+    root_id: i64,
+    deleted_at: i64,
+) -> AppResult<Vec<String>> {
+    let conn = open_conn(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT fd.crop_path FROM face_detections fd
+         JOIN files f ON f.id = fd.file_id
+         WHERE f.root_id = ?1 AND f.deleted_at = ?2 AND fd.crop_path IS NOT NULL",
+    )?;
+    let rows = stmt.query_map(params![root_id, deleted_at], |row| row.get::<_, String>(0))?;
+    let mut paths = Vec::new();
+    for row in rows {
+        paths.push(row?);
+    }
+    Ok(paths)
 }
 
 /// Delete file records from DB for the given ids (FTS + files table).
@@ -2677,6 +2735,31 @@ pub fn rename_person(db_path: &Path, person_id: i64, new_name: &str) -> AppResul
     Ok(())
 }
 
+pub fn set_representative_face(db_path: &Path, person_id: i64, face_id: i64) -> AppResult<()> {
+    let conn = open_conn(db_path)?;
+    // Validate face belongs to this person
+    let owner: Option<i64> = conn
+        .query_row(
+            "SELECT person_id FROM face_detections WHERE id = ?1",
+            params![face_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| AppError::Config(format!("face {face_id} not found")))?;
+    match owner {
+        Some(pid) if pid == person_id => {}
+        _ => {
+            return Err(AppError::Config(format!(
+                "face {face_id} does not belong to person {person_id}"
+            )));
+        }
+    }
+    conn.execute(
+        "UPDATE people SET representative_face_id = ?1 WHERE id = ?2",
+        params![face_id, person_id],
+    )?;
+    Ok(())
+}
+
 pub fn list_faces_for_person(
     db_path: &Path,
     person_id: i64,
@@ -2781,6 +2864,97 @@ pub fn merge_persons(db_path: &Path, source_id: i64, target_id: i64) -> AppResul
         ) WHERE id = ?1",
         params![target_id],
     )?;
+    Ok(())
+}
+
+pub fn reassign_faces_to_person(
+    db_path: &Path,
+    face_ids: &[i64],
+    target_person_id: i64,
+) -> AppResult<()> {
+    if face_ids.is_empty() {
+        return Ok(());
+    }
+    let conn = open_conn(db_path)?;
+
+    // Validate target person exists
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM people WHERE id = ?1)",
+            params![target_person_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    if !exists {
+        return Err(AppError::InvalidPath(format!(
+            "Target person {target_person_id} not found"
+        )));
+    }
+
+    // Collect source person IDs before moving
+    let placeholders: Vec<String> = face_ids.iter().map(|_| "?".to_string()).collect();
+    let in_clause = placeholders.join(",");
+    let source_person_ids: Vec<i64> = {
+        let sql = format!(
+            "SELECT DISTINCT person_id FROM face_detections WHERE id IN ({in_clause}) AND person_id IS NOT NULL AND person_id != ?",
+        );
+        let mut params: Vec<Value> = face_ids.iter().map(|&id| Value::Integer(id)).collect();
+        params.push(Value::Integer(target_person_id));
+        let mut stmt = conn.prepare(&sql)?;
+        let rows: Vec<i64> = stmt
+            .query_map(params_from_iter(params), |row| row.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        rows
+    };
+
+    // Move faces to target person
+    {
+        let sql = format!("UPDATE face_detections SET person_id = ?1 WHERE id IN ({in_clause})",);
+        let mut params: Vec<Value> = vec![Value::Integer(target_person_id)];
+        params.extend(face_ids.iter().map(|&id| Value::Integer(id)));
+        conn.execute(&sql, params_from_iter(params))?;
+    }
+
+    // Clean up source persons
+    for source_id in &source_person_ids {
+        let remaining: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM face_detections WHERE person_id = ?1",
+            params![source_id],
+            |row| row.get(0),
+        )?;
+
+        if remaining == 0 {
+            conn.execute("DELETE FROM people WHERE id = ?1", params![source_id])?;
+        } else {
+            // Update representative for source person
+            conn.execute(
+                "UPDATE people SET representative_face_id = COALESCE(
+                    (SELECT fd.id FROM face_detections fd
+                     WHERE fd.person_id = ?1 AND fd.crop_path IS NOT NULL
+                     ORDER BY fd.confidence DESC LIMIT 1),
+                    (SELECT fd.id FROM face_detections fd
+                     WHERE fd.person_id = ?1
+                     ORDER BY fd.confidence DESC LIMIT 1)
+                ) WHERE id = ?1",
+                params![source_id],
+            )?;
+        }
+    }
+
+    // Update representative for target person
+    conn.execute(
+        "UPDATE people SET representative_face_id = COALESCE(
+            (SELECT fd.id FROM face_detections fd
+             WHERE fd.person_id = ?1 AND fd.crop_path IS NOT NULL
+             ORDER BY fd.confidence DESC LIMIT 1),
+            (SELECT fd.id FROM face_detections fd
+             WHERE fd.person_id = ?1
+             ORDER BY fd.confidence DESC LIMIT 1)
+        ) WHERE id = ?1",
+        params![target_person_id],
+    )?;
+
     Ok(())
 }
 
@@ -6451,6 +6625,258 @@ mod tests {
             assert_eq!(face.person_id, Some(persons[0].id));
             assert!(face.confidence > 0.0);
         }
+    }
+
+    // ── reassign_faces_to_person tests ──────────────────────
+
+    #[test]
+    fn reassign_faces_to_person_moves_faces() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/faces").expect("root");
+
+        let emb_a: Vec<f32> = (0..512).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect();
+        let emb_b: Vec<f32> = (0..512).map(|i| if i == 1 { 1.0 } else { 0.0 }).collect();
+
+        // Create two files with very different embeddings → two persons
+        let f1 = sample_record(root_id, "ra1.jpg", "fp-ra1");
+        upsert_file_record(&db_path, &f1).expect("file");
+        let fid1 = file_id_by_path(&db_path, root_id, "ra1.jpg");
+        let f2 = sample_record(root_id, "ra2.jpg", "fp-ra2");
+        upsert_file_record(&db_path, &f2).expect("file");
+        let fid2 = file_id_by_path(&db_path, root_id, "ra2.jpg");
+        let f3 = sample_record(root_id, "ra3.jpg", "fp-ra3");
+        upsert_file_record(&db_path, &f3).expect("file");
+        let fid3 = file_id_by_path(&db_path, root_id, "ra3.jpg");
+
+        let face1 = insert_test_face(&db_path, fid1, &emb_a);
+        let face2 = insert_test_face(&db_path, fid2, &emb_a);
+        let face3 = insert_test_face(&db_path, fid3, &emb_b);
+
+        cluster_faces(&db_path, 0.30).expect("cluster");
+
+        let persons = list_persons(&db_path, &[]).expect("list");
+        assert_eq!(persons.len(), 2, "Should have 2 persons");
+
+        // Find which person has face3 (the one with emb_b)
+        let conn = open_conn(&db_path).expect("open");
+        let person_a: i64 = conn
+            .query_row(
+                "SELECT person_id FROM face_detections WHERE id = ?1",
+                params![face1],
+                |r| r.get(0),
+            )
+            .expect("query");
+        let person_b: i64 = conn
+            .query_row(
+                "SELECT person_id FROM face_detections WHERE id = ?1",
+                params![face3],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert_ne!(person_a, person_b);
+
+        // Move face1 from person_a to person_b
+        reassign_faces_to_person(&db_path, &[face1], person_b).expect("reassign");
+
+        // Verify face1 is now in person_b
+        let new_pid: i64 = conn
+            .query_row(
+                "SELECT person_id FROM face_detections WHERE id = ?1",
+                params![face1],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert_eq!(new_pid, person_b);
+
+        // person_a should still exist (face2 remains)
+        let pa_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM face_detections WHERE person_id = ?1",
+                params![person_a],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert_eq!(pa_count, 1);
+
+        // person_b should have 2 faces now
+        let pb_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM face_detections WHERE person_id = ?1",
+                params![person_b],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert_eq!(pb_count, 2);
+    }
+
+    #[test]
+    fn reassign_faces_to_person_deletes_empty_source() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/faces").expect("root");
+
+        let emb_a: Vec<f32> = (0..512).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect();
+        let emb_b: Vec<f32> = (0..512).map(|i| if i == 1 { 1.0 } else { 0.0 }).collect();
+
+        let f1 = sample_record(root_id, "rb1.jpg", "fp-rb1");
+        upsert_file_record(&db_path, &f1).expect("file");
+        let fid1 = file_id_by_path(&db_path, root_id, "rb1.jpg");
+        let f2 = sample_record(root_id, "rb2.jpg", "fp-rb2");
+        upsert_file_record(&db_path, &f2).expect("file");
+        let fid2 = file_id_by_path(&db_path, root_id, "rb2.jpg");
+
+        // One face per person, different embeddings
+        let face1 = insert_test_face(&db_path, fid1, &emb_a);
+        let _face2 = insert_test_face(&db_path, fid2, &emb_b);
+
+        cluster_faces(&db_path, 0.30).expect("cluster");
+
+        let persons = list_persons(&db_path, &[]).expect("list");
+        assert_eq!(persons.len(), 2, "Should have 2 persons");
+
+        let conn = open_conn(&db_path).expect("open");
+        let person_a: i64 = conn
+            .query_row(
+                "SELECT person_id FROM face_detections WHERE id = ?1",
+                params![face1],
+                |r| r.get(0),
+            )
+            .expect("query");
+        let person_b: i64 = conn
+            .query_row(
+                "SELECT person_id FROM face_detections WHERE id = ?1",
+                params![_face2],
+                |r| r.get(0),
+            )
+            .expect("query");
+
+        // Move the only face from person_a to person_b
+        reassign_faces_to_person(&db_path, &[face1], person_b).expect("reassign");
+
+        // person_a should be deleted
+        let pa_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM people WHERE id = ?1)",
+                params![person_a],
+                |r| r.get(0),
+            )
+            .unwrap_or(true);
+        assert!(!pa_exists, "Source person should be deleted when empty");
+
+        // person_b should have 2 faces
+        let pb_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM face_detections WHERE person_id = ?1",
+                params![person_b],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert_eq!(pb_count, 2);
+    }
+
+    // ── Face crop cleanup + representative face tests ─────────
+
+    #[test]
+    fn collect_face_crop_paths_for_files_returns_crops() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/crops").expect("root");
+
+        let rec = sample_record(root_id, "img.jpg", "fp-crop");
+        upsert_file_record(&db_path, &rec).expect("upsert");
+        let fid = file_id_by_path(&db_path, root_id, "img.jpg");
+
+        let face_id = insert_test_face(&db_path, fid, &vec![0.5_f32; 512]);
+        update_face_crop_path(&db_path, face_id, "/cache/face_crops/42.jpg").expect("set crop");
+
+        let paths = collect_face_crop_paths_for_files(&db_path, &[fid]).expect("collect");
+        assert_eq!(paths, vec!["/cache/face_crops/42.jpg"]);
+    }
+
+    #[test]
+    fn collect_face_crop_paths_empty_input() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+
+        let paths = collect_face_crop_paths_for_files(&db_path, &[]).expect("collect");
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn set_representative_face_updates() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/rep").expect("root");
+
+        let rec = sample_record(root_id, "img.jpg", "fp-rep");
+        upsert_file_record(&db_path, &rec).expect("upsert");
+        let fid = file_id_by_path(&db_path, root_id, "img.jpg");
+
+        let emb: Vec<f32> = vec![0.5; 512];
+        let face_id = insert_test_face(&db_path, fid, &emb);
+        update_face_crop_path(&db_path, face_id, "/cache/face_crops/99.jpg").expect("crop");
+
+        // Cluster to create a person
+        cluster_faces(&db_path, 0.45).expect("cluster");
+        let persons = list_persons(&db_path, &[]).expect("list");
+        assert_eq!(persons.len(), 1);
+        let person_id = persons[0].id;
+
+        // Set representative face
+        set_representative_face(&db_path, person_id, face_id).expect("set rep");
+
+        let conn = open_conn(&db_path).expect("open");
+        let rep: i64 = conn
+            .query_row(
+                "SELECT representative_face_id FROM people WHERE id = ?1",
+                params![person_id],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert_eq!(rep, face_id);
+    }
+
+    #[test]
+    fn set_representative_face_rejects_wrong_person() {
+        let (_dir, db_path) = test_db_path();
+        init_database(&db_path).expect("init");
+        let root_id = upsert_root(&db_path, "/tmp/repfail").expect("root");
+
+        let rec1 = sample_record(root_id, "a.jpg", "fp-a");
+        upsert_file_record(&db_path, &rec1).expect("upsert");
+        let f1 = file_id_by_path(&db_path, root_id, "a.jpg");
+        let rec2 = sample_record(root_id, "b.jpg", "fp-b");
+        upsert_file_record(&db_path, &rec2).expect("upsert");
+        let f2 = file_id_by_path(&db_path, root_id, "b.jpg");
+
+        // Two distinct embeddings → two persons
+        let emb_a: Vec<f32> = (0..512).map(|i| if i == 0 { 1.0 } else { 0.0 }).collect();
+        let emb_b: Vec<f32> = (0..512).map(|i| if i == 1 { 1.0 } else { 0.0 }).collect();
+        let face_a = insert_test_face(&db_path, f1, &emb_a);
+        let _face_b = insert_test_face(&db_path, f2, &emb_b);
+
+        cluster_faces(&db_path, 0.45).expect("cluster");
+        let persons = list_persons(&db_path, &[]).expect("list");
+        assert_eq!(persons.len(), 2);
+
+        // Find which person does NOT own face_a
+        let conn = open_conn(&db_path).expect("open");
+        let owner: i64 = conn
+            .query_row(
+                "SELECT person_id FROM face_detections WHERE id = ?1",
+                params![face_a],
+                |r| r.get(0),
+            )
+            .expect("owner");
+        let other_person = persons
+            .iter()
+            .find(|p| p.id != owner)
+            .expect("other person");
+
+        // Should fail: face_a doesn't belong to other_person
+        let result = set_representative_face(&db_path, other_person.id, face_a);
+        assert!(result.is_err());
     }
 
     fn file_id_by_path(db_path: &std::path::Path, root_id: i64, rel_path: &str) -> i64 {

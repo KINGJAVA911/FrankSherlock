@@ -286,3 +286,11 @@ export async function listFacesForPerson(personId: number): Promise<FaceInfo[]> 
 export async function unassignFaceFromPerson(faceId: number): Promise<void> {
   return invoke<void>("unassign_face_from_person", { faceId });
 }
+
+export async function reassignFacesToPerson(faceIds: number[], targetPersonId: number): Promise<void> {
+  return invoke<void>("reassign_faces_to_person", { faceIds, targetPersonId });
+}
+
+export async function setRepresentativeFace(personId: number, faceId: number): Promise<void> {
+  return invoke<void>("set_representative_face", { personId, faceId });
+}
