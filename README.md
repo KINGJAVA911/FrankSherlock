@@ -14,6 +14,7 @@ Local-only, AI-powered image cataloging and search for your NAS. Point it at a d
 - Generates 300px JPEG thumbnails for fast browsing (PDF 2-page montage)
 - Full-text search with SQLite FTS5
 - Finds duplicate files -- exact matches by content fingerprint, near-duplicates by perceptual hash (dHash) + description similarity
+- Detects and recognizes faces using native ONNX models (SCRFD + ArcFace) -- clusters faces into people, lets you name and merge them, and search by `face:name`
 - Detects renamed/moved files by fingerprint, so they don't get re-classified
 - Resumes interrupted scans from the last checkpoint
 - Live discovery progress during file walks on large directories
@@ -83,16 +84,16 @@ WEBKIT_DISABLE_DMABUF_RENDERER=1 GDK_BACKEND=wayland,x11 npm run tauri:dev
 ## Tests
 
 ```bash
-# Rust (268 tests)
+# Rust (322 tests)
 cd sherlock/desktop/src-tauri
 cargo test
 
-# Frontend (218 tests)
+# Frontend (299 tests)
 cd sherlock/desktop
 npm run test
 ```
 
-Covers classification JSON parsing, thumbnail generation, incremental scanning, database operations, scan cancellation, query parsing, duplicate detection, similarity scoring, video metadata, platform abstraction, and UI components.
+Covers classification JSON parsing, thumbnail generation, incremental scanning, database operations, scan cancellation, query parsing, duplicate detection, similarity scoring, video metadata, face detection/clustering, platform abstraction, and UI components.
 
 ## How it works
 
@@ -118,6 +119,18 @@ Find and remove redundant copies to reclaim disk space:
 - **Group comparison** -- side-by-side preview of all files in a duplicate group with per-file metadata.
 - **3-tier confidence coloring** -- green (exact, safe to delete), yellow (near >= 85%), red (lower, needs visual check).
 
+### Face detection and recognition
+
+Find and organize people across your photo library:
+
+1. **Detection** -- SCRFD (ONNX) finds faces with bounding boxes and 5-point keypoints. Models are downloaded automatically on first use from the InsightFace buffalo_l pack.
+2. **Recognition** -- ArcFace produces 512-dimensional embeddings for each detected face, enabling identity-aware comparison.
+3. **Clustering** -- cosine similarity (threshold 0.45) groups faces into people. New faces are assigned to existing clusters or start new ones.
+4. **Management** -- name people, merge duplicates, remove false detections. FacesView shows all people with representative face crops.
+5. **Search** -- `face:alice`, `face:"Full Name"`, or `face:42` (by person ID) to find all photos of someone.
+
+Face detection runs per-folder from the context menu and shows progress in the status bar.
+
 ### Classification pipeline
 
 Each new image goes through several stages:
@@ -135,6 +148,7 @@ Full-text search across filenames, paths, descriptions, OCR text, and character/
 - `bank transfer 2024`
 - `receipt santander`
 - `screenshot confidence >= 0.8`
+- `face:alice` or `face:"Full Name"`
 
 ## Project structure
 
@@ -147,6 +161,7 @@ sherlock/                  <- Main application
       scan.rs              <- Incremental scanner (4-phase) with cancellation + resume
       db.rs                <- SQLite + FTS5 + duplicate queries
       similarity.rs        <- dHash + description similarity + Union-Find grouping
+      face.rs              <- Native ONNX face detection (SCRFD) + recognition (ArcFace)
       pdf.rs               <- PDFium text extraction + page rendering
       video.rs             <- ffmpeg metadata, keyframe extraction, subtitle parsing
       video_server.rs      <- Localhost HTTP Range streaming for video preview

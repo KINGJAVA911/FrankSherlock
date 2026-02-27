@@ -39,9 +39,9 @@ From `sherlock/desktop/`:
 ```bash
 npm install                    # frontend deps
 cargo build                    # rust backend (from src-tauri/)
-cargo test                     # 76 unit tests
+cargo test                     # 322 unit tests
 npm run tauri:dev              # launch dev mode
-npm run test                   # 84 frontend tests
+npm run test                   # 299 frontend tests
 npm run tauri:build            # produce AppImage/DMG/MSI
 ```
 
@@ -55,6 +55,7 @@ WEBKIT_DISABLE_DMABUF_RENDERER=1 GDK_BACKEND=wayland,x11 npm run tauri:dev
 | Module | Purpose |
 |--------|---------|
 | `classify.rs` | Ollama vision LLM pipeline: primary classification (3-attempt + regex salvage), anime enrichment, Surya OCR + LLM fallback, document/receipt extraction |
+| `face.rs` | Native ONNX face detection (SCRFD) and recognition (ArcFace), 512-dim embeddings, cosine clustering, person management |
 | `thumbnail.rs` | 300px JPEG thumbnails, Lanczos3, skip-if-exists, GIF first-frame |
 | `scan.rs` | Two-phase incremental scan: metadata-only discovery (zero reads for unchanged), classification + thumbnail processing, move detection, cache cleanup, cooperative cancellation |
 | `db.rs` | SQLite + FTS5, scan job checkpointing, upsert/move/delete operations |
@@ -95,10 +96,10 @@ WEBKIT_DISABLE_DMABUF_RENDERER=1 GDK_BACKEND=wayland,x11 npm run tauri:dev
 
 ```bash
 # Rust (from sherlock/desktop/src-tauri/)
-cargo test                     # 76 tests
+cargo test                     # 322 tests
 
 # Frontend (from sherlock/desktop/)
-npm run test                   # 84 tests
+npm run test                   # 299 tests
 ```
 
 Tests cover: JSON parsing fallbacks, thumbnail generation, incremental scan discovery, DB operations (upsert, touch, delete, FTS), query parsing, scan job persistence, platform abstraction, and all UI components. Shared test fixtures live in `src/__tests__/fixtures.ts`.
